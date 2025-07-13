@@ -17,7 +17,11 @@ var cmd = &cobra.Command{
 	Long:  `Instant calculation of an audio track cue-in, cue-out, overlay, replaygain, loudness and more parameters`,
 	Run: func(cmd *cobra.Command, args []string) {
 		calc := cue.Calculator{}
-		res := calc.Calc()
+		res, err := calc.Calc()
+		if err != nil {
+			fmt.Printf("error while calculating cue/loudness parameters: %s", err)
+			return
+		}
 		jsonData, err := res.MarshalNiceJSON()
 		if err != nil {
 			fmt.Printf("error while marshalling the result: %s", err)
