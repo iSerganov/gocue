@@ -79,6 +79,8 @@ var (
 type Calculator struct {
 	executionTimeout time.Duration
 	targetLoudness   float64
+	blankSkip        float64
+	noClip           bool
 }
 
 // Calc returns actual results
@@ -234,4 +236,136 @@ func takePureValue(key, val string) (string, error) {
 		return "", fmt.Errorf("unexpected value [%s] found in [%s] tag", val, key)
 	}
 	return res[0], nil
+}
+
+// try to avoid re-analysis if we have enough data but different loudness target
+func (c *Calculator) doPreAnalysis(tags map[string]string) error {
+	for _, bt := range baseTags {
+		if _, ok := tags[bt]; !ok {
+			return ErrRequireAnalysis{inner: fmt.Errorf("tag '%s' is missing", bt)}
+		}
+	}
+
+	liqAmplify, liqAmplifyOK := tags["liq_amplify"]
+	if !liqAmplifyOK {
+		return ErrRequireAnalysis{inner: fmt.Errorf("tag liq_amplify is missing")}
+	}
+	refLoudness, refLoudnessOK := tags["liq_reference_loudness"]
+	if !refLoudnessOK {
+		return ErrRequireAnalysis{inner: fmt.Errorf("tag liq_reference_loudness is missing")}
+	}
+	//adjust liq_amplify by loudness target difference, set reference
+	amplifyVal, err := strconv.ParseFloat(liqAmplify, 32)
+	if err == nil {
+		loudnessVal, err := strconv.ParseFloat(refLoudness, 32)
+		if err == nil {
+			tags["liq_amplify"] = fmt.Sprintf("%.5f", amplifyVal+(c.targetLoudness-loudnessVal))
+			tags["liq_reference_loudness"] = fmt.Sprintf("%.5f", c.targetLoudness)
+		}
+	}
+
+	_, liqTruePeakOK := tags["liq_true_peak"]
+	if !liqTruePeakOK {
+		return ErrRequireAnalysis{inner: fmt.Errorf("tag liq_true_peak is missing")}
+	}
+	liqTruePeakDb, liqTruePeakDbOK := tags["liq_true_peak_db"]
+	if !liqTruePeakDbOK {
+		return ErrRequireAnalysis{inner: fmt.Errorf("tag liq_true_peak_db is missing")}
+	}
+	liqLoudness, liqLoudnessOK := tags["liq_loudness"]
+	if !liqLoudnessOK {
+		return ErrRequireAnalysis{inner: fmt.Errorf("tag liq_loudness is missing")}
+	}
+	liqTruePeakDbVal, err := strconv.ParseFloat(liqTruePeakDb, 32)
+	if err != nil {
+		return ErrRequireAnalysis{inner: fmt.Errorf("cannot parse liq_true_peak_db: %w", err)}
+	}
+	liqLoudnessVal, err := strconv.ParseFloat(liqLoudness, 32)
+	if err != nil {
+		return ErrRequireAnalysis{inner: fmt.Errorf("cannot parse liq_loudness: %w", err)}
+	}
+	liqAmplifyVal, liqAmplifyAdjVal := c.calcAmplify(liqLoudnessVal, liqTruePeakDbVal)
+	tags["liq_amplify"] = fmt.Sprintf("%.5f", liqAmplifyVal)
+	tags["liq_amplify_adjustment"] = fmt.Sprintf("%.5f", liqAmplifyAdjVal)
+
+	// if liq_blankskip different from requested, we need a re-analysis
+	liqBlankSkip, liqBlankSkipOK := tags["liq_blankskip"]
+	if liqBlankSkipOK {
+		liqBlankSkipVal, err := strconv.ParseFloat(liqBlankSkip, 32)
+		if err == nil && liqBlankSkipVal != c.blankSkip {
+			return ErrRequireAnalysis{inner: fmt.Errorf("liq_blankskip is different from the requested one")}
+		}
+	}
+
+	// liq_loudness_range is only informational but we want to show correct values
+	// can’t blindly take replaygain_track_range—it might be in different unit
+	if _, ok := tags["liq_loudness_range"]; !ok {
+		return ErrRequireAnalysis{inner: fmt.Errorf("tag liq_loudness_range is missing")}
+	}
+	return nil
+}
+
+func (c *Calculator) populate(tags map[string]string) {
+	// we need not check those in tags_mandatory and those calculated by doPreAnalysis
+
+	if _, ok := tags["liq_longtail"]; !ok {
+		tags["liq_longtail"] = "false"
+	}
+
+	if _, ok := tags["liq_sustained_ending"]; !ok {
+		tags["liq_sustained_ending"] = "false"
+	}
+
+	if _, ok := tags["liq_amplify"]; !ok {
+		tags["liq_amplify"] = tags["replaygain_track_gain"]
+	}
+
+	if _, ok := tags["liq_amplify_adjustment"]; !ok {
+		tags["liq_amplify_adjustment"] = "0.0" // dB
+	}
+
+	if _, ok := tags["liq_loudness"]; !ok {
+		replayGain, _ := strconv.ParseFloat(tags["replaygain_track_gain"], 32)
+		tags["liq_loudness"] = fmt.Sprintf("%.5f", c.targetLoudness-replayGain)
+	}
+
+	if _, ok := tags["liq_blankskip"]; !ok {
+		tags["liq_blankskip"] = fmt.Sprintf("%t", c.blankSkip)
+	}
+
+	if _, ok := tags["liq_blank_skipped"]; !ok {
+		tags["liq_blank_skipped"] = "false"
+	}
+
+	if _, ok := tags["liq_reference_loudness"]; !ok {
+		tags["liq_reference_loudness"] = fmt.Sprintf("%.5f", c.targetLoudness)
+	}
+
+	// for RG tag writing
+	if _, ok := tags["replaygain_track_gain"]; !ok {
+		// ??? on line 319 we set liq_amplify from replaygain_track_gain - re-visit later!!!
+		tags["replaygain_track_gain"] = tags["liq_amplify"]
+	}
+	if _, ok := tags["replaygain_track_peak"]; !ok {
+		tags["replaygain_track_peak"] = tags["liq_true_peak"]
+	}
+	if _, ok := tags["replaygain_track_range"]; !ok {
+		tags["replaygain_track_range"] = tags["liq_loudness_range"]
+	}
+	if _, ok := tags["replaygain_reference_loudness"]; !ok {
+		tags["replaygain_reference_loudness"] = tags["liq_reference_loudness"]
+	}
+}
+
+func (c *Calculator) calcAmplify(loudness, liqTruePeakDb float64) (amplify, amplifyCorrection float64) {
+	// check if we need to reduce the gain for true peaks
+	amplify = c.targetLoudness - loudness
+	if c.noClip {
+		maxAmplify := -1.0 - liqTruePeakDb // difference to EBU recommended -1 dBFS
+		if amplify > maxAmplify {
+			amplifyCorrection = maxAmplify - amplify
+			amplify = maxAmplify
+		}
+	}
+	return
 }
