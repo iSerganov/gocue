@@ -75,3 +75,24 @@ func (s *CalculatorSuite) TestTakePureValue() {
 		})
 	}
 }
+
+func (s *CalculatorSuite) TestScan() {
+	tests := []struct {
+		title string
+		file  string
+		err   error
+	}{
+		{
+			title: "should scan .ogg file and return data",
+			file:  "test_data/sample.ogg",
+		},
+	}
+
+	for _, tc := range tests {
+		s.Run(tc.title, func() {
+			calculator := Calculator{targetLoudness: -16.4, executionTimeout: 5 * time.Second}
+			_, err := calculator.scan(tc.file)
+			s.Equal(tc.err, err)
+		})
+	}
+}
