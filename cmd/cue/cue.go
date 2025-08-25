@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/iSerganov/gocue/pkg/cue"
 )
@@ -22,6 +23,7 @@ var (
 	drop        float64
 	noclip      bool
 	nice        bool
+	printFlags  bool
 	blankskip   float64
 	execTimeout time.Duration
 )
@@ -46,6 +48,12 @@ A full audio file analysis can take some time. gocue tries to avoid a (re-)analy
 		if err := validateRanges(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %s\n", err)
 			os.Exit(1)
+		}
+
+		if printFlags {
+			cmd.Flags().VisitAll(func(f *pflag.Flag) {
+				fmt.Printf("Flag: %s, Value: %v\n", f.Name, f.Value)
+			})
 		}
 
 		// Process the audio file
@@ -141,6 +149,9 @@ func init() {
 
 	// Blank skip
 	cmd.Flags().Float64VarP(&blankskip, "blankskip", "b", 0.0, "Skip blank (silence) within track if longer than [BLANKSKIP] seconds (get rid of \"hidden tracks\"). Sets the cue-out point to where the silence begins. Don't use this with spoken or TTS-generated text, as it will often cut the message short. Zero (0.0) to switch off.")
+
+	// Log all flags
+	cmd.Flags().BoolVarP(&printFlags, "print_flags", "p", false, "Log all flags")
 }
 
 // Execute - useful work gets done here
