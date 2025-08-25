@@ -1,4 +1,4 @@
-VERSION ?= 0.0.3
+VERSION ?= 1.0.0
 
 build:
 	@echo "building gocue..."
