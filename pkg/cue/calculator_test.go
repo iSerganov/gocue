@@ -2,6 +2,7 @@ package cue
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -94,5 +95,41 @@ func (s *CalculatorSuite) TestScan() {
 			_, err := calculator.scan(tc.file)
 			s.Equal(tc.err, err)
 		})
+	}
+}
+
+func BenchmarkScan(b *testing.B) {
+	calculator := Calculator{targetLoudness: -16.4, executionTimeout: 5 * time.Second}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := calculator.scan("test_data/sample.ogg")
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkParseFFmpegOutput(b *testing.B) {
+	// Create sample ffmpeg output data
+	sampleData := `frame: pts_time:0.0 lavfi.r128.M=-23.5 lavfi.r128.I=-23.5
+frame: pts_time:0.1 lavfi.r128.M=-22.8 lavfi.r128.I=-23.2
+frame: pts_time:0.2 lavfi.r128.M=-21.9 lavfi.r128.I=-23.0
+frame: pts_time:0.3 lavfi.r128.M=-20.5 lavfi.r128.I=-22.5
+frame: pts_time:0.4 lavfi.r128.M=-19.8 lavfi.r128.I=-22.0
+frame: pts_time:0.5 lavfi.r128.M=-18.9 lavfi.r128.I=-21.5
+frame: pts_time:0.6 lavfi.r128.M=-17.2 lavfi.r128.I=-20.8
+frame: pts_time:0.7 lavfi.r128.M=-16.5 lavfi.r128.I=-20.0
+frame: pts_time:0.8 lavfi.r128.M=-15.8 lavfi.r128.I=-19.2
+frame: pts_time:0.9 lavfi.r128.M=-14.9 lavfi.r128.I=-18.5
+frame: pts_time:1.0 lavfi.r128.M=-13.2 lavfi.r128.I=-17.8
+lavfi.r128.true_peaks_ch0=0.123 lavfi.r128.LRA=5.2`
+
+	calculator := &Calculator{}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		reader := strings.NewReader(sampleData)
+		_ = calculator.parseFFmpegOutput(reader)
 	}
 }
