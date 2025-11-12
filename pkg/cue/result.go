@@ -65,6 +65,8 @@ func (r *Result) Annotations() (out map[string]string, err error) {
 			res[key] = fmt.Sprintf("%.3f", v)
 		case bool:
 			res[key] = fmt.Sprintf("%t", v)
+		default:
+			res[key] = "N/A"
 		}
 	}
 	return res, nil
