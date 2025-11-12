@@ -2,6 +2,7 @@ package cue
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"gopkg.in/yaml.v3"
 )
@@ -39,4 +40,32 @@ func (r *Result) MarshalJSON() (out []byte, err error) {
 // MarshalNiceJSON - returns pretty formatted json
 func (r *Result) MarshalNiceJSON() (out []byte, err error) {
 	return json.MarshalIndent(*r, " ", " ")
+}
+
+// Annotations - unmarshaled JSON as map of strings
+func (r *Result) Annotations() (out map[string]string, err error) {
+	// marshal annotations into bytes
+	calcBytes, err := r.MarshalJSON()
+	if err != nil {
+		return nil, err
+	}
+
+	// convert bytes annotations into map
+	anyMap := map[string]any{}
+	err = json.Unmarshal(calcBytes, &anyMap)
+	if err != nil {
+		return nil, err
+	}
+	res := map[string]string{}
+	for key, val := range anyMap {
+		switch v := val.(type) {
+		case string:
+			res[key] = v
+		case float64:
+			res[key] = fmt.Sprintf("%.3f", v)
+		case bool:
+			res[key] = fmt.Sprintf("%t", v)
+		}
+	}
+	return res, nil
 }
