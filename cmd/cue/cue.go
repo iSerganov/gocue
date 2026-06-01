@@ -71,8 +71,8 @@ A full audio file analysis can take some time. gocue tries to avoid a (re-)analy
 
 		res, err := calc.Calc(args[0])
 		if err != nil {
-			fmt.Printf("error while calculating cue/loudness parameters: %s", err)
-			return
+			fmt.Fprintf(os.Stderr, "error while calculating cue/loudness parameters: %s\n", err)
+			os.Exit(1)
 		}
 		var (
 			jsonData []byte
@@ -83,8 +83,8 @@ A full audio file analysis can take some time. gocue tries to avoid a (re-)analy
 			jsonData, err = res.MarshalJSON()
 		}
 		if err != nil {
-			fmt.Printf("error while marshalling the result: %s", err)
-			return
+			fmt.Fprintf(os.Stderr, "error while marshalling the result: %s\n", err)
+			os.Exit(1)
 		}
 		_, _ = fmt.Print(string(jsonData) + "\n")
 	},

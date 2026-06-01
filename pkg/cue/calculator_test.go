@@ -2,7 +2,9 @@ package cue
 
 import (
 	"fmt"
+	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -98,6 +100,115 @@ func (s *CalculatorSuite) TestScan() {
 	}
 }
 
+// TestScanRegression pins scan() output against values verified to be identical
+// to the upstream Python autocue (cue_file) for the bundled fixtures. It guards
+// the cue/overlay math — in particular the max(t, total-t) "mirror" formulas —
+// against accidental regressions. Time values use a small delta; ffmpeg's
+// loudness can vary slightly across builds, so booleans/times are the anchors.
+func (s *CalculatorSuite) TestScanRegression() {
+	tests := []struct {
+		file           string
+		cueIn          float64
+		cueOut         float64
+		crossStartNext float64
+		longtail       bool
+		sustained      bool
+	}{
+		{"test_data/classic.wav", 0.0, 103.6, 102.2, false, true},
+		{"test_data/sample.ogg", 0.0, 112.4, 111.4, false, false},
+		{"test_data/tch_big.ogg", 1.1, 743.6, 731.9, true, true},
+	}
+
+	// default options, matching the CLI defaults and the Python reference
+	for _, tc := range tests {
+		s.Run(tc.file, func() {
+			if _, err := os.Stat(tc.file); err != nil {
+				s.T().Skipf("fixture %s not available: %v", tc.file, err)
+			}
+			calc := NewCalculator(nil)
+			calc.executionTimeout = 30 * time.Second
+			res, err := calc.scan(tc.file)
+			s.Require().NoError(err)
+			s.InDelta(tc.cueIn, res.CueIn, 0.05, "liq_cue_in")
+			s.InDelta(tc.cueOut, res.CueOut, 0.05, "liq_cue_out")
+			s.InDelta(tc.crossStartNext, res.CrossStartNext, 0.05, "liq_cross_start_next")
+			s.Equal(tc.longtail, res.LongTail, "liq_longtail")
+			s.Equal(tc.sustained, res.SustainedEnding, "liq_sustained_ending")
+		})
+	}
+}
+
+// TestAdjustLoudnessReferenceLoudness covers the §2.4 fix: the -107 SPL
+// conversion must only apply to the legacy positive-SPL form, and the
+// liq_reference_loudness fallback must use the (possibly adjusted) value.
+func (s *CalculatorSuite) TestAdjustLoudnessReferenceLoudness() {
+	s.Run("legacy positive SPL is converted", func() {
+		c := NewCalculator(nil)
+		tags := map[string]string{"replaygain_reference_loudness": "89"}
+		c.adjustLoudness(tags)
+		s.Equal("-18.000", tags["replaygain_reference_loudness"])
+		s.Equal("-18.000", tags["liq_reference_loudness"])
+	})
+
+	s.Run("modern negative LUFS is left untouched", func() {
+		c := NewCalculator(nil)
+		tags := map[string]string{"replaygain_reference_loudness": "-18"}
+		c.adjustLoudness(tags)
+		s.Equal("-18", tags["replaygain_reference_loudness"])
+		s.Equal("-18", tags["liq_reference_loudness"])
+	})
+}
+
+// TestParseTagsReferenceLoudness covers the §2.3 fix: the cached path must emit
+// liq_reference_loudness and use the same precision as the scan path.
+func (s *CalculatorSuite) TestParseTagsReferenceLoudness() {
+	res := parseTags(map[string]string{
+		"liq_reference_loudness": "-18.0",
+		"liq_true_peak_db":       "-1.2",
+	})
+	s.Equal("-18.000 LUFS", res.ReferenceLoudness)
+	s.Equal("-1.200 dBFS", res.TruePeakDb)
+}
+
+// TestScanConcurrent runs the full pipeline on the fixtures from many goroutines
+// sharing one Calculator, so `go test -race` gets genuine concurrent access to
+// the package's shared state (regex, lookup slices, byte prefixes) and to the
+// per-call analysis. Assertions are collected and checked on the test goroutine
+// (testify's Require/Goexit must not run in spawned goroutines).
+func (s *CalculatorSuite) TestScanConcurrent() {
+	files := []string{"test_data/classic.wav", "test_data/sample.ogg", "test_data/tch_big.ogg"}
+	var present []string
+	for _, f := range files {
+		if _, err := os.Stat(f); err == nil {
+			present = append(present, f)
+		}
+	}
+	if len(present) == 0 {
+		s.T().Skip("no fixtures available")
+	}
+
+	calc := NewCalculator(nil)
+	calc.executionTimeout = 60 * time.Second
+
+	workers := 2 * len(present)
+	errCh := make(chan error, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(f string) {
+			defer wg.Done()
+			if _, err := calc.Calc(f); err != nil {
+				errCh <- fmt.Errorf("Calc(%s): %w", f, err)
+			}
+		}(present[i%len(present)])
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		s.NoError(err)
+	}
+}
+
 func BenchmarkScan(b *testing.B) {
 	calculator := Calculator{targetLoudness: -16.4, executionTimeout: 5 * time.Second}
 
@@ -130,6 +241,6 @@ lavfi.r128.true_peaks_ch0=0.123 lavfi.r128.LRA=5.2`
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		reader := strings.NewReader(sampleData)
-		_ = calculator.parseFFmpegOutput(reader)
+		_, _, _ = calculator.parseFFmpegOutput(reader)
 	}
 }
