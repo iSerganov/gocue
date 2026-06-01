@@ -1,7 +1,7 @@
 # gocue
 
 [![CI](https://github.com/iSerganov/gocue/actions/workflows/ci.yml/badge.svg)](https://github.com/iSerganov/gocue/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/iSerganov/gocue/graph/badge.svg)](https://codecov.io/gh/iSerganov/gocue)
+[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/iSerganov/gocue/badges/coverage.json)](https://github.com/iSerganov/gocue/actions/workflows/ci.yml)
 [![Go Version](https://img.shields.io/badge/Go-1.26+-blue.svg)](https://golang.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/Version-1.1.0-blue.svg)](Makefile)
@@ -28,7 +28,7 @@ For the internal details see the [presentation](https://moonbase59.github.io/aut
 
 ### Prerequisites
 
-- Go 1.24 or higher
+- Go 1.26 or higher
 - FFmpeg and FFprobe installed and available in PATH
 - Audio files to analyze
 
