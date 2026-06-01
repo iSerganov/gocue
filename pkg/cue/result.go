@@ -3,6 +3,7 @@ package cue
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 
 	"gopkg.in/yaml.v3"
 )
@@ -70,4 +71,44 @@ func (r *Result) Annotations() (out map[string]string, err error) {
 		}
 	}
 	return res, nil
+}
+
+// parseTags builds a Result from existing file tags (the cached/fast path that
+// skips a full ffmpeg analysis). Kept in sync with the scan() path so both
+// produce identical output.
+func parseTags(tags map[string]string) *Result {
+	duration, _ := strconv.ParseFloat(tags["duration"], 64)
+	cueDuration, _ := strconv.ParseFloat(tags["liq_cue_duration"], 64)
+	cueIn, _ := strconv.ParseFloat(tags["liq_cue_in"], 64)
+	cueOut, _ := strconv.ParseFloat(tags["liq_cue_out"], 64)
+	crossStartNext, _ := strconv.ParseFloat(tags["liq_cross_start_next"], 64)
+	longtail := tags["liq_longtail"] == "true"
+	sustainedEnding := tags["liq_sustained_ending"] == "true"
+	blankSkip, _ := strconv.ParseFloat(tags["liq_blankskip"], 64)
+	blankSkipped := tags["liq_blank_skipped"] == "true"
+	truePeak, _ := strconv.ParseFloat(tags["liq_true_peak"], 64)
+	truePeakDb, _ := strconv.ParseFloat(tags["liq_true_peak_db"], 64)
+	loudness, _ := strconv.ParseFloat(tags["liq_loudness"], 64)
+	loudnessRange, _ := strconv.ParseFloat(tags["liq_loudness_range"], 64)
+	amplify, _ := strconv.ParseFloat(tags["liq_amplify"], 64)
+	amplifyCorrection, _ := strconv.ParseFloat(tags["liq_amplify_adjustment"], 64)
+	referenceLoudness, _ := strconv.ParseFloat(tags["liq_reference_loudness"], 64)
+	return &Result{
+		Duration:          duration,
+		CueDuration:       cueDuration,
+		CueIn:             cueIn,
+		CueOut:            cueOut,
+		CrossStartNext:    crossStartNext,
+		LongTail:          longtail,
+		SustainedEnding:   sustainedEnding,
+		Loudness:          fmt.Sprintf("%.3f LUFS", loudness),
+		LoudnessRange:     fmt.Sprintf("%.3f LU", loudnessRange),
+		Amplify:           fmt.Sprintf("%.3f dB", amplify),
+		AmplifyAdjustment: fmt.Sprintf("%.3f dB", amplifyCorrection),
+		ReferenceLoudness: fmt.Sprintf("%.3f LUFS", referenceLoudness),
+		BlankSkip:         blankSkip,
+		BlankSkipped:      blankSkipped,
+		TruePeak:          truePeak,
+		TruePeakDb:        fmt.Sprintf("%.3f dBFS", truePeakDb),
+	}
 }

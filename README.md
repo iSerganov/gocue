@@ -1,8 +1,10 @@
 # gocue
 
-[![Go Version](https://img.shields.io/badge/Go-1.24+-blue.svg)](https://golang.org/)
+[![CI](https://github.com/iSerganov/gocue/actions/workflows/ci.yml/badge.svg)](https://github.com/iSerganov/gocue/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/iSerganov/gocue/graph/badge.svg)](https://codecov.io/gh/iSerganov/gocue)
+[![Go Version](https://img.shields.io/badge/Go-1.26+-blue.svg)](https://golang.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-1.0.0-blue.svg)](Makefile)
+[![Version](https://img.shields.io/badge/Version-1.1.0-blue.svg)](Makefile)
 
 **gocue** is a high-performance Go-based audio analysis tool designed for professional audio workflows. It analyzes audio files to detect cue-in, cue-out, overlay points, and provides comprehensive EBU R128 loudness measurements. The tool is optimized for integration with Liquidsoap's "autocue:" protocol and supports writing metadata tags to avoid unnecessary re-analysis.
 

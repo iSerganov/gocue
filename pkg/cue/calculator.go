@@ -1,17 +1,14 @@
 package cue
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"math"
+	"os"
 	"os/exec"
 	"regexp"
 	"slices"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -22,34 +19,26 @@ const (
 	ffprobe = "ffprobe"
 	// Reference Loudness Target
 	defaultTargetLUFS = -18.0
-	// -96 dB/LU is "digital silence" for 16-bit audio.
-	// A "noise floor" of -60 dB/LU (42 dB/LU below -18 target) is a good value to use.
-	//
-	//	LU below average for cue-in/cue-out trigger ("silence")
+	// LU below average track loudness for cue-in/cue-out trigger ("silence");
+	// -42 LU below -18 target ≈ a -60 dB noise floor
 	defaultSilence = -42.0
 	// LU below average for overlay trigger (start next song)
 	defaultOverlayLU = -8.0
-	// more than LONGTAIL_SECONDS below OVERLAY_LU are considered a "long tail"
+	// more than this many seconds below the overlay level is a "long tail"
 	defaultLongTailSeconds = 15.0
-	// educe 15 dB extra on long tail songs to find overlap point
+	// extra LU below overlay to find the overlap point on long-tail songs
 	longTailExtraLU = -12.0
-	// max. percent drop to be considered sustained
+	// max. percent drop to be considered a sustained ending
 	defaultSustainedLoudnessDrop = 40.0
-	// in. seconds silence to detect blank
+	// min. seconds of silence to detect a blank
 	defaultBlankSkip        = 0.0
 	defaultExecutionTimeout = 10 * time.Second
 )
 
 var (
-	// Extract time "t", momentary (last 400ms) loudness "M" and "I" integrated loudness
-	// from ebur128 filter. Measured every 100ms.
-	// With some file types, like MP3, M can become "nan" (not-a-number),
-	// which is a valid float in Python. Usually happens on very silent parts.
-	// We convert these to float("-inf") for comparability in silence detection.
-	// FIXME: This relies on "I" coming two lines after "M"
-	// re              = regexp.MustCompile(`frame:.*pts_time:\s*(?P<t>\d+\.?\d*)\s*lavfi\.r128\.M=(?P<M>nan|[+-]?\d+\.?\d*)\s*.*\s*lavfi\.r128\.I=(?P<I>nan|[+-]?\d+\.?\d*)\s*(?P<rest>(\s*(?!frame:).*)*)`)
+	// extracts the first numeric value from a (possibly unit-suffixed) tag value
 	digitalValRegex = regexp.MustCompile(`([+-]?\d*\.?\d+)`)
-	// minimum set of tags after "read_tags" that must be there before skipping analysis
+	// minimum set of tags that must be present before skipping analysis
 	baseTags = []string{
 		"duration",
 		"liq_cue_in",
@@ -158,55 +147,57 @@ func (c *Calculator) Calc(pathToFile string) (*Result, error) {
 func (c *Calculator) probe(pathToFile string) (map[string]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), c.executionTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, ffprobe, []string{
-		"-v",
-		"quiet",
+	cmd := exec.CommandContext(ctx, ffprobe,
+		"-v", "quiet",
 		"-show_entries",
-		"stream=codec_name,duration,bit_rate,sample_fmt,sample_rate,time_base,codec_type:stream_tags:format_tags",
-		"-of",
-		"json=compact=1",
+		"stream=codec_name,duration,bit_rate,sample_fmt,sample_rate,time_base,codec_type:stream_tags:format=duration:format_tags",
+		"-of", "json=compact=1",
 		pathToFile,
-	}...)
+	)
 	res, err := cmd.Output()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ffprobe failed for %q: %w", pathToFile, err)
 	}
-	var allResults map[string]any
-	err = json.Unmarshal(res, &allResults)
-	if err != nil {
-		return nil, err
+
+	// ffprobe always emits tag values as JSON strings, so decode straight into
+	// a typed struct instead of map[string]any + unchecked type assertions
+	// (the latter panic on e.g. OGG/Opus, where stream duration is often absent).
+	var probed struct {
+		Streams []struct {
+			CodecType string            `json:"codec_type"`
+			Duration  string            `json:"duration"`
+			Tags      map[string]string `json:"tags"`
+		} `json:"streams"`
+		Format struct {
+			Duration string `json:"duration"`
+		} `json:"format"`
 	}
-	streams := allResults["streams"].([]any)
-	var tags = make(map[string]string)
-	for _, s := range streams {
-		sMap := s.(map[string]any)
-		//fmt.Printf("stream data: %+v", sMap)
-		streamType := sMap["codec_type"]
-		if streamType != "audio" {
+	if err := json.Unmarshal(res, &probed); err != nil {
+		return nil, fmt.Errorf("cannot parse ffprobe output for %q: %w", pathToFile, err)
+	}
+
+	tags := make(map[string]string)
+	for _, s := range probed.Streams {
+		if s.CodecType != "audio" {
 			continue
 		}
-		dur := sMap["duration"].(string)
-		tags["duration"] = dur
-		foundTags, ok := sMap["tags"]
-		if ok {
-			for key, val := range foundTags.(map[string]any) {
-				if !slices.Contains(verifyTags, key) {
-					continue
-				}
-				switch v := val.(type) {
-				case int:
-					tags[key] = fmt.Sprintf("%d", v)
-				case float32:
-					tags[key] = fmt.Sprintf("%.3f", v)
-				case string:
-					res, err := takePureValue(key, v)
-					if err != nil {
-						fmt.Printf("tag read error: %s\n", err.Error())
-						continue
-					}
-					tags[key] = res
-				}
+		// stream-level duration is often missing for containers like OGG/Opus;
+		// fall back to the container (format) duration in that case
+		if s.Duration != "" {
+			tags["duration"] = s.Duration
+		} else if probed.Format.Duration != "" {
+			tags["duration"] = probed.Format.Duration
+		}
+		for key, val := range s.Tags {
+			if !slices.Contains(verifyTags, key) {
+				continue
 			}
+			clean, err := takePureValue(key, val)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "tag read error: %s\n", err.Error())
+				continue
+			}
+			tags[key] = clean
 		}
 	}
 	return tags, nil
@@ -223,31 +214,28 @@ func (c *Calculator) adjustLoudness(tags map[string]string) {
 
 	// add missing liq_amplify, if we have replaygain_track_gain
 	if _, ok := tags["liq_amplify"]; !ok {
-		replayGain, ok := tags["replaygain_track_gain"]
-		if ok {
+		if replayGain, ok := tags["replaygain_track_gain"]; ok {
 			tags["liq_amplify"] = replayGain
 		}
 	}
 
-	//  Handle old RG1/mp3gain positive loudness reference
-	// "89 dB" (SPL) should actually be -14 LUFS, but as a reference
-	// it is usually set equal to the RG2 -18 LUFS reference point
-	// add missing liq_amplify, if we have replaygain_track_gain
+	// Handle old RG1/mp3gain positive loudness reference: only the legacy
+	// positive-SPL form (e.g. "89 dB") needs the -107 conversion; modern RG2
+	// stores this as a negative LUFS value that must be left untouched
+	// (subtracting 107 would corrupt it). Mirrors the `> 0.0` guard in Python.
 	if replayRefLoudness, ok := tags["replaygain_reference_loudness"]; ok {
 		val, err := strconv.ParseFloat(replayRefLoudness, 64)
-		if err == nil {
+		if err == nil && val > 0.0 {
 			val -= 107.0
 			tags["replaygain_reference_loudness"] = fmt.Sprintf("%.3f", val)
 		}
-		// add missing liq_reference_loudness, if we have
-		//  replaygain_reference_loudness
+		// add missing liq_reference_loudness (using the possibly-adjusted value)
 		if _, ok := tags["liq_reference_loudness"]; !ok {
-			tags["liq_reference_loudness"] = replayRefLoudness
+			tags["liq_reference_loudness"] = tags["replaygain_reference_loudness"]
 		}
 	}
 
-	// if both liq_cue_in & liq_cue_out available, we can calculate
-	// liq_cue_duration
+	// if both liq_cue_in & liq_cue_out available, we can calculate liq_cue_duration
 	if cueIn, ok := tags["liq_cue_in"]; ok {
 		cueInVal, err := strconv.ParseFloat(cueIn, 64)
 		if err == nil {
@@ -288,7 +276,8 @@ func takePureValue(key, val string) (string, error) {
 	return res[0], nil
 }
 
-// try to avoid re-analysis if we have enough data but different loudness target
+// doPreAnalysis tries to avoid re-analysis when we have enough tag data but a
+// different loudness target; it returns ErrRequireAnalysis if a full scan is needed.
 func (c *Calculator) doPreAnalysis(tags map[string]string) error {
 	for _, bt := range baseTags {
 		if _, ok := tags[bt]; !ok {
@@ -304,18 +293,16 @@ func (c *Calculator) doPreAnalysis(tags map[string]string) error {
 	if !refLoudnessOK {
 		return ErrRequireAnalysis{inner: fmt.Errorf("tag liq_reference_loudness is missing")}
 	}
-	//adjust liq_amplify by loudness target difference, set reference
-	amplifyVal, err := strconv.ParseFloat(liqAmplify, 64)
-	if err == nil {
-		loudnessVal, err := strconv.ParseFloat(refLoudness, 64)
-		if err == nil {
-			tags["liq_amplify"] = fmt.Sprintf("%.3f", amplifyVal+(c.targetLoudness-loudnessVal))
+	// liq_amplify is recomputed from liq_loudness by calcAmplify below, so we
+	// only record the requested reference loudness here, under the same guard
+	// (both inputs must be valid numbers).
+	if _, err := strconv.ParseFloat(liqAmplify, 64); err == nil {
+		if _, err := strconv.ParseFloat(refLoudness, 64); err == nil {
 			tags["liq_reference_loudness"] = fmt.Sprintf("%.3f", c.targetLoudness)
 		}
 	}
 
-	_, liqTruePeakOK := tags["liq_true_peak"]
-	if !liqTruePeakOK {
+	if _, ok := tags["liq_true_peak"]; !ok {
 		return ErrRequireAnalysis{inner: fmt.Errorf("tag liq_true_peak is missing")}
 	}
 	liqTruePeakDb, liqTruePeakDbOK := tags["liq_true_peak_db"]
@@ -338,17 +325,16 @@ func (c *Calculator) doPreAnalysis(tags map[string]string) error {
 	tags["liq_amplify"] = fmt.Sprintf("%.3f", liqAmplifyVal)
 	tags["liq_amplify_adjustment"] = fmt.Sprintf("%.3f", liqAmplifyAdjVal)
 
-	// if liq_blankskip different from requested, we need a re-analysis
-	liqBlankSkip, liqBlankSkipOK := tags["liq_blankskip"]
-	if liqBlankSkipOK {
+	// if liq_blankskip differs from requested, we need a re-analysis
+	if liqBlankSkip, ok := tags["liq_blankskip"]; ok {
 		liqBlankSkipVal, err := strconv.ParseFloat(liqBlankSkip, 64)
 		if err == nil && liqBlankSkipVal != c.blankSkip {
 			return ErrRequireAnalysis{inner: fmt.Errorf("liq_blankskip is different from the requested one")}
 		}
 	}
 
-	// liq_loudness_range is only informational but we want to show correct values
-	// can’t blindly take replaygain_track_range—it might be in different unit
+	// liq_loudness_range is only informational but we want to show correct values;
+	// we can't blindly take replaygain_track_range—it might be in a different unit
 	if _, ok := tags["liq_loudness_range"]; !ok {
 		return ErrRequireAnalysis{inner: fmt.Errorf("tag liq_loudness_range is missing")}
 	}
@@ -356,43 +342,35 @@ func (c *Calculator) doPreAnalysis(tags map[string]string) error {
 }
 
 func (c *Calculator) populate(tags map[string]string) {
-	// we need not check those in tags_mandatory and those calculated by doPreAnalysis
+	// fill in tags not already present or computed by doPreAnalysis
 	if _, ok := tags["liq_longtail"]; !ok {
 		tags["liq_longtail"] = "false"
 	}
-
 	if _, ok := tags["liq_sustained_ending"]; !ok {
 		tags["liq_sustained_ending"] = "false"
 	}
-
 	if _, ok := tags["liq_amplify"]; !ok {
 		tags["liq_amplify"] = tags["replaygain_track_gain"]
 	}
-
 	if _, ok := tags["liq_amplify_adjustment"]; !ok {
 		tags["liq_amplify_adjustment"] = "0.0" // dB
 	}
-
 	if _, ok := tags["liq_loudness"]; !ok {
 		replayGain, _ := strconv.ParseFloat(tags["replaygain_track_gain"], 64)
 		tags["liq_loudness"] = fmt.Sprintf("%.3f", c.targetLoudness-replayGain)
 	}
-
 	if _, ok := tags["liq_blankskip"]; !ok {
 		tags["liq_blankskip"] = fmt.Sprintf("%.3f", c.blankSkip)
 	}
-
 	if _, ok := tags["liq_blank_skipped"]; !ok {
 		tags["liq_blank_skipped"] = "false"
 	}
-
 	if _, ok := tags["liq_reference_loudness"]; !ok {
 		tags["liq_reference_loudness"] = fmt.Sprintf("%.3f", c.targetLoudness)
 	}
 
-	// for RG tag writing
+	// for ReplayGain tag writing
 	if _, ok := tags["replaygain_track_gain"]; !ok {
-		// ??? on line 319 we set liq_amplify from replaygain_track_gain - re-visit later!!!
 		tags["replaygain_track_gain"] = tags["liq_amplify"]
 	}
 	if _, ok := tags["replaygain_track_peak"]; !ok {
@@ -417,418 +395,4 @@ func (c *Calculator) calcAmplify(loudness, liqTruePeakDb float64) (amplify, ampl
 		}
 	}
 	return
-}
-
-func (c Calculator) scan(filename string) (*Result, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), c.executionTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, ffmpeg, []string{
-		"-v",
-		"info",
-		"-nostdin",
-		"-y",
-		"-i",
-		filename,
-		"-vn",
-		"-af",
-		fmt.Sprintf("ebur128=target=%.3f:peak=true:metadata=1,ametadata=mode=print:file=-", c.targetLoudness),
-		"-f",
-		"null",
-		"null",
-	}...)
-	filterOutput, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		_ = filterOutput.Close()
-	}()
-
-	if err = cmd.Start(); err != nil {
-		return nil, err
-	}
-	frames := c.parseFFmpegOutput(filterOutput)
-
-	lastFrame := frames[len(frames)-1]
-
-	strVals := strings.Split(lastFrame.TPLRString, ";")
-
-	var (
-		truePeak      float64
-		loudnessRange float64
-		truePeakDb    float64
-	)
-	for _, val := range strVals {
-		if strings.HasPrefix(val, "lavfi.r128.true_peaks_ch") {
-			truePeakVal, err := strconv.ParseFloat(val[strings.Index(val, "_ch")+5:], 64)
-			if err == nil {
-				truePeak = max(truePeak, truePeakVal)
-			}
-			continue
-		}
-		if strings.HasPrefix(val, "lavfi.r128.LRA=") {
-			lra, err := strconv.ParseFloat(val[strings.Index(val, "LRA=")+4:], 64)
-			if err == nil {
-				loudnessRange = lra
-			}
-			continue
-		}
-	}
-
-	if truePeak > 0 {
-		truePeakDb = 20 * math.Log10(truePeak)
-	} else {
-		truePeakDb = math.Inf(-1)
-	}
-
-	duration := frames[len(frames)-1].PTSTime + 0.1
-	dueStr := fmt.Sprintf("%.2f", duration)
-	duration, _ = strconv.ParseFloat(dueStr, 2)
-	loudness := frames[len(frames)-1].IntegratedLoudness
-	// Find cue-in point (loudness above "silence")
-	silenceLevel := loudness + c.silence
-	cueInTime := 0.0
-	start := 0
-	end := len(frames)
-	for i := start; i < end; i++ {
-		if frames[i].Loudness > silenceLevel {
-			cueInTime = frames[i].PTSTime
-			start = i
-			break
-		}
-	}
-	// EBU R.128 measures loudness over the last 400ms,
-	// adjust to zero if we land before 400ms for cue-in
-	if cueInTime < 0.4 {
-		cueInTime = 0.0
-	}
-
-	// Instead of simply reversing the list (measure.reverse()), we henceforth
-	// use "start" and "end" pointers into the measure list, so we can easily
-	// check forwards and backwards, and handle partial ranges better.
-	// This is mainly for early cue-outs due to blanks in file ("hidden tracks"),
-	// as we need to handle overlaying and long tails correctly in this case.
-
-	cueOutTime := 0.0
-	cueOutTimeBlank := 0.0
-	endBlank := end
-
-	// Cue-out when silence starts within a song, like "hidden tracks".
-	// Check forward in this case, looking for a silence of specified length.
-	if c.blankSkip > 0 {
-		i := start
-		for i < end {
-			if frames[i].Loudness <= silenceLevel {
-				cueOutTimeBlankStart := frames[i].PTSTime
-				cueOutTimeBlankStop := frames[i].PTSTime + c.blankSkip
-				endBlank = i + 1
-				for i < end && frames[i].Loudness <= silenceLevel && frames[i].PTSTime <= cueOutTimeBlankStop {
-					i++
-				}
-				if i >= end {
-					// ran into end of track, reset end_blank
-					endBlank = end
-					break
-				}
-				if frames[i].PTSTime >= cueOutTimeBlankStop {
-					// found silence long enough, set cue-out to its begin
-					cueOutTimeBlank = cueOutTimeBlankStart
-					break
-				} else {
-					// found silence too short, continue search
-					i++
-					continue
-				}
-			} else {
-				i++
-			}
-		}
-	}
-
-	// Normal cue-out: check backwards, from the end, for loudness above "silence"
-	for i := end - 1; i >= start; i-- {
-		if frames[i].Loudness > silenceLevel {
-			cueOutTime = frames[i].PTSTime
-			end = i + 1
-			break
-		}
-	}
-	// cue out PAST the current frame (100ms) -- no, reverse that
-	cueOutTime = math.Max(cueOutTime, duration-cueOutTime)
-
-	// Adjust cue-out and "end" point if we're working with blank detection.
-	// Also set a flag (`liq_blank_skipped`) so we can later see if cue-out is early.
-	blankSkipped := false
-	if c.blankSkip > 0 {
-		if 0.0 < cueOutTimeBlank && cueOutTimeBlank < cueOutTime {
-			cueOutTime = cueOutTimeBlank
-			blankSkipped = true
-		}
-		end = endBlank
-	}
-
-	// Find overlap point (where to start next song), backwards from end,
-	// by checking if song loudness goes below overlay start volume
-	cueDuration := cueOutTime - cueInTime
-	startNextLevel := loudness + c.overlay
-	startNextTime := 0.0
-	startNextIdx := end
-	for i := end - 1; i >= start; i-- {
-		if frames[i].Loudness > startNextLevel {
-			startNextTime = frames[i].PTSTime
-			startNextIdx = i
-			break
-		}
-	}
-	startNextTime = math.Max(startNextTime, cueOutTime-startNextTime)
-
-	// Calculate loudness drop over arbitrary number of measure elements
-	// Split into left & right part, use avg momentary loudness & time of each
-	calcEnding := func(elements []*Frame) (midTime, midLufs, angle, lufsRatioPct, endLufs float64) {
-		l := len(elements)
-		if l < 1 {
-			return 0, 0, 0, 0, 0
-		}
-		l2 := l / 2
-		var p1, p2 []*Frame
-		if l >= 2 {
-			p1 = elements[:l2]
-			// leave out midpoint if we have an odd number of elements
-			// this is mainly for sliding window techniques
-			// and guarantees both halves are the same size
-			p2 = elements[l2+l%2:]
-		} else {
-			p1 = elements[:]
-			p2 = elements[:]
-		}
-
-		// time of midpoint (not used in calculation)
-		var x1, x2, y1, y2 float64
-		for _, elem := range p1 {
-			x1 += elem.PTSTime
-			y1 += elem.Loudness
-		}
-		for _, elem := range p2 {
-			x2 += elem.PTSTime
-			y2 += elem.Loudness
-		}
-
-		// calculate averages
-		if l2 > 0 {
-			x1 /= float64(len(p1))
-			x2 /= float64(len(p2))
-			y1 /= float64(len(p1))
-			y2 /= float64(len(p2))
-		}
-
-		dx := x2 - x1
-		dy := y2 - y1
-
-		// use math.Atan2 instead of math.Atan, determines quadrant, handles errors
-		// slope angle clockwise in degrees
-		angle = math.Atan2(dy, dx) * 180 / math.Pi
-		midTime = elements[l2].PTSTime  // midpoint time in seconds
-		midLufs = elements[l2].Loudness // midpoint momentary loudness in LUFS
-
-		if y2 != 0 {
-			lufsRatioPct = (1 - (y1 / y2)) * 100.0 // ending LUFS ratio in %
-		} else {
-			lufsRatioPct = (1 - math.Inf(1)) * 100.0
-		}
-
-		endLufs = y2
-		return
-	}
-
-	// Check for "sustained ending", comparing loudness ratios at end of song
-	sustained := false
-	startNextTimeSustained := 0.0
-
-	// Calculation can only be done if we have at least one measure point.
-	// We don't if we're already at the end. (Badly cut file?)
-	if startNextIdx < end {
-		_, _, _, lufsRatioPct, endLufs := calcEnding(frames[startNextIdx:end])
-		fmt.Printf("Overlay: %.2f LUFS, Longtail: %.2f LUFS, Measured end avg: %.2f LUFS, Drop: %.2f%%\n",
-			loudness+c.overlay, loudness+c.overlay+c.extra, endLufs, lufsRatioPct)
-
-		// We want to keep songs with a sustained ending intact, so if the
-		// calculated loudness drop at the end (LUFS ratio) is smaller than
-		// the set percentage, we check again, by reducing the loudness
-		// to look for by the maximum of end loudness and set extra longtail
-		// loudness
-		if lufsRatioPct < c.drop {
-			sustained = true
-			startNextLevel = math.Max(endLufs, loudness+c.overlay+c.extra)
-			startNextTimeSustained = 0.0
-			for i := end - 1; i >= start; i-- {
-				if frames[i].Loudness > startNextLevel {
-					startNextTimeSustained = frames[i].PTSTime
-					break
-				}
-			}
-			startNextTimeSustained = math.Max(startNextTimeSustained, cueOutTime-startNextTimeSustained)
-		}
-	} else {
-		fmt.Printf("Already at end of track (badly cut?), no ending to analyse.\n")
-	}
-
-	// We want to keep songs with a long fade-out intact, so if the calculated
-	// overlap is longer than the "longtail_seconds" time, we check again, by reducing
-	// the loudness to look for by an additional "extra" amount of LU
-	longtail := false
-	startNextTimeLongtail := 0.0
-	if (cueOutTime - startNextTime) > c.longtailSeconds {
-		longtail = true
-		startNextLevel = loudness + c.overlay + c.extra
-		startNextTimeLongtail = 0.0
-		for i := end - 1; i >= start; i-- {
-			if frames[i].Loudness > startNextLevel {
-				startNextTimeLongtail = frames[i].PTSTime
-				break
-			}
-		}
-		startNextTimeLongtail = math.Max(startNextTimeLongtail, cueOutTime-startNextTimeLongtail)
-	}
-
-	// Consolidate results from sustained and longtail
-	startNextTimeNew := math.Max(math.Max(startNextTime, startNextTimeSustained), startNextTimeLongtail)
-	fmt.Printf("Overlay times: %.2f/%.2f/%.2f s (normal/sustained/longtail), using: %.2fs.\n",
-		startNextTime, startNextTimeSustained, startNextTimeLongtail, startNextTimeNew)
-	startNextTime = startNextTimeNew
-	fmt.Printf("Cue out time: %.2f s\n", cueOutTime)
-
-	// Now that we know where to start the next song, calculate Liquidsoap's
-	// cross duration from it, allowing for an extra 0.1s of overlap -- no, reverse
-	// (a value of 0.0 is invalid in Liquidsoap)
-	// crossDuration := cueOutTime - startNextTime // commented out as in Python
-
-	amplify, amplifyCorrection := c.calcAmplify(loudness, truePeakDb)
-
-	// We now also return start_next_time
-
-	// NOTE: Liquidsoap doesn't currently accept `liq_cross_duration=0.`,
-	// or `liq_cross_start_next == liq_cue_out`, but this can happen.
-	// We adjust for that in the Liquidsoap protocol, because other AutoDJ
-	// applications might want the correct values.
-
-	// return a Result struct
-	return &Result{
-		CueDuration:     cueDuration,
-		CueIn:           cueInTime,
-		CueOut:          cueOutTime,
-		CrossStartNext:  startNextTime,
-		LongTail:        longtail,
-		SustainedEnding: sustained,
-		// CrossDuration: crossDuration, // commented out as in Python
-		Loudness:          fmt.Sprintf("%.3f LUFS", loudness),
-		LoudnessRange:     fmt.Sprintf("%.3f LU", loudnessRange),
-		Amplify:           fmt.Sprintf("%.3f dB", amplify),
-		AmplifyAdjustment: fmt.Sprintf("%.3f dB", amplifyCorrection),
-		ReferenceLoudness: fmt.Sprintf("%.3f LUFS", c.targetLoudness),
-		BlankSkip:         c.blankSkip,
-		BlankSkipped:      blankSkipped,
-		Duration:          duration,
-		TruePeak:          truePeak,
-		TruePeakDb:        fmt.Sprintf("%.3f dBFS", truePeakDb),
-		// for RG writing
-		// Note: These would need to be added to Result struct if needed
-		// ReplayGainTrackGain: amplify,
-		// ReplayGainTrackPeak: truePeak,
-		// ReplayGainTrackRange: loudnessRange,
-		// ReplayGainReferenceLoudness: c.targetLoudness
-	}, nil
-}
-
-// parseFFmpegOutput parses the ffmpeg output to extract measurements
-func (c *Calculator) parseFFmpegOutput(reader io.Reader) []*Frame {
-	var frames []*Frame
-	var currentFrame *Frame
-
-	scanner := bufio.NewScanner(reader)
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		if strings.HasPrefix(line, "frame:") {
-			// Extract pts_time
-			if strings.Contains(line, "pts_time:") {
-				ptsIndex := strings.Index(line, "pts_time:")
-				if ptsIndex != -1 {
-					ptsStr := line[ptsIndex+9:]
-					// Extract the time value
-					parts := strings.Fields(ptsStr)
-					if len(parts) > 0 {
-						if pts, err := strconv.ParseFloat(parts[0], 64); err == nil {
-							currentFrame = &Frame{PTSTime: pts}
-							frames = append(frames, currentFrame)
-						}
-					}
-				}
-			}
-			continue
-		}
-
-		if currentFrame != nil {
-			if strings.HasPrefix(line, "lavfi.r128.M=") {
-				loudnessStr := line[strings.Index(line, "M=")+2:]
-				if loudness, err := strconv.ParseFloat(loudnessStr, 64); err == nil {
-					currentFrame.Loudness = loudness
-				}
-				continue
-			}
-
-			if strings.HasPrefix(line, "lavfi.r128.I=") {
-				iLoudnessStr := line[strings.Index(line, "I=")+2:]
-				if iLoudness, err := strconv.ParseFloat(iLoudnessStr, 64); err == nil {
-					currentFrame.IntegratedLoudness = iLoudness
-				}
-				continue
-			}
-
-			if strings.HasPrefix(line, "lavfi.r128.true_peaks_ch") || strings.HasPrefix(line, "lavfi.r128.LRA=") {
-				if currentFrame.TPLRString != "" {
-					currentFrame.TPLRString += fmt.Sprintf(";%s", line)
-				} else {
-					currentFrame.TPLRString = line
-				}
-				continue
-			}
-		}
-	}
-
-	return frames
-}
-
-func parseTags(tags map[string]string) *Result {
-	duration, _ := strconv.ParseFloat(tags["duration"], 64)
-	cueDuration, _ := strconv.ParseFloat(tags["liq_cue_duration"], 64)
-	cueIn, _ := strconv.ParseFloat(tags["liq_cue_in"], 64)
-	cueOut, _ := strconv.ParseFloat(tags["liq_cue_out"], 64)
-	crossStartNext, _ := strconv.ParseFloat(tags["liq_cross_start_next"], 64)
-	longtail := tags["liq_longtail"] == "true"
-	sustainedEnding := tags["liq_sustained_ending"] == "true"
-	blankSkip, _ := strconv.ParseFloat(tags["liq_blankskip"], 64)
-	blankSkipped := tags["liq_blank_skipped"] == "true"
-	truePeak, _ := strconv.ParseFloat(tags["liq_true_peak"], 64)
-	truePeakDb, _ := strconv.ParseFloat(tags["liq_true_peak_db"], 64)
-	loudness, _ := strconv.ParseFloat(tags["liq_loudness"], 64)
-	loudnessRange, _ := strconv.ParseFloat(tags["liq_loudness_range"], 64)
-	amplify, _ := strconv.ParseFloat(tags["liq_amplify"], 64)
-	amplifyCorrection, _ := strconv.ParseFloat(tags["liq_amplify_adjustment"], 64)
-	return &Result{
-		Duration:          duration,
-		CueDuration:       cueDuration,
-		CueIn:             cueIn,
-		CueOut:            cueOut,
-		CrossStartNext:    crossStartNext,
-		LongTail:          longtail,
-		SustainedEnding:   sustainedEnding,
-		Loudness:          fmt.Sprintf("%.3f LUFS", loudness),
-		LoudnessRange:     fmt.Sprintf("%.3f LU", loudnessRange),
-		Amplify:           fmt.Sprintf("%.3f dB", amplify),
-		AmplifyAdjustment: fmt.Sprintf("%.3f dB", amplifyCorrection),
-		BlankSkip:         blankSkip,
-		BlankSkipped:      blankSkipped,
-		TruePeak:          truePeak,
-		TruePeakDb:        fmt.Sprintf("%.2f dBFS", truePeakDb),
-	}
 }
