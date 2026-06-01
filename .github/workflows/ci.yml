@@ -26,6 +26,8 @@ jobs:
   build-test:
     name: build & test (race)
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # needed to publish the coverage badge to the 'badges' branch
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -39,9 +41,24 @@ jobs:
         run: go build ./...
       - name: Test (race + coverage)
         run: go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v6
+      - name: Generate coverage badge data
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: |
+          COVERAGE=$(go tool cover -func=coverage.out | awk '/^total:/ {print $3}')
+          ROUNDED=$(printf '%.0f' "${COVERAGE%\%}")
+          if   [ "$ROUNDED" -ge 80 ]; then COLOR=brightgreen
+          elif [ "$ROUNDED" -ge 65 ]; then COLOR=green
+          elif [ "$ROUNDED" -ge 50 ]; then COLOR=yellow
+          elif [ "$ROUNDED" -ge 35 ]; then COLOR=orange
+          else COLOR=red
+          fi
+          mkdir -p badge
+          printf '{"schemaVersion":1,"label":"coverage","message":"%s","color":"%s"}\n' "$COVERAGE" "$COLOR" | tee badge/coverage.json
+      - name: Publish coverage badge to 'badges' branch
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: JamesIves/github-pages-deploy-action@v4
         with:
-          files: ./coverage.out
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
+          branch: badges
+          folder: badge
+          commit-message: "chore: update coverage badge [skip ci]"
+          single-commit: true
