@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
-	"slices"
 	"strconv"
 	"time"
 )
@@ -46,33 +46,47 @@ var (
 		"liq_cross_start_next",
 		"replaygain_track_gain",
 	}
-	// these are the tags to check when reading/writing tags from/to files
-	verifyTags = []string{
-		"duration",
-		"liq_amplify_adjustment",
-		"liq_amplify",
-		"liq_blankskip",
-		"liq_blank_skipped",
-		"liq_cross_duration",
-		"liq_cross_start_next",
-		"liq_cue_duration",
-		"liq_cue_file",
-		"liq_cue_in",
-		"liq_cue_out",
-		"liq_fade_in",
-		"liq_fade_out",
-		"liq_longtail",
-		"liq_loudness",
-		"liq_loudness_range",
-		"liq_reference_loudness",
-		"liq_sustained_ending",
-		"liq_true_peak_db",
-		"liq_true_peak",
-		"r128_track_gain",
-		"replaygain_reference_loudness",
-		"replaygain_track_gain",
-		"replaygain_track_peak",
-		"replaygain_track_range",
+	// set of tags to keep when reading tags from files; membership is checked
+	// per stream tag in probe, so a set gives O(1) lookups
+	verifyTags = map[string]struct{}{
+		"duration":                      {},
+		"liq_amplify_adjustment":        {},
+		"liq_amplify":                   {},
+		"liq_blankskip":                 {},
+		"liq_blank_skipped":             {},
+		"liq_cross_duration":            {},
+		"liq_cross_start_next":          {},
+		"liq_cue_duration":              {},
+		"liq_cue_file":                  {},
+		"liq_cue_in":                    {},
+		"liq_cue_out":                   {},
+		"liq_fade_in":                   {},
+		"liq_fade_out":                  {},
+		"liq_longtail":                  {},
+		"liq_loudness":                  {},
+		"liq_loudness_range":            {},
+		"liq_reference_loudness":        {},
+		"liq_sustained_ending":          {},
+		"liq_true_peak_db":              {},
+		"liq_true_peak":                 {},
+		"r128_track_gain":               {},
+		"replaygain_reference_loudness": {},
+		"replaygain_track_gain":         {},
+		"replaygain_track_peak":         {},
+		"replaygain_track_range":        {},
+	}
+	// tag values that carry a unit suffix (e.g. "-1.2 dBFS") and must be
+	// reduced to their bare numeric value by takePureValue
+	needsCleaning = map[string]struct{}{
+		"liq_amplify":                   {},
+		"liq_amplify_adjustment":        {},
+		"liq_loudness":                  {},
+		"liq_loudness_range":            {},
+		"liq_reference_loudness":        {},
+		"replaygain_track_gain":         {},
+		"replaygain_track_range":        {},
+		"replaygain_reference_loudness": {},
+		"liq_true_peak_db":              {},
 	}
 )
 
@@ -87,9 +101,20 @@ type CalculatorOptions struct {
 	Extra            float64
 	Drop             float64
 	NoClip           bool
+	// Diagnostics receives human-readable progress/analysis messages emitted
+	// during a scan. Defaults to os.Stderr when nil; set to io.Discard to
+	// silence, or a buffer to capture in tests.
+	Diagnostics io.Writer
 }
 
-// NewCalculator - create a new calculator
+// NewCalculator - create a new calculator.
+//
+// A nil opts yields a calculator with every parameter at its default. When opts
+// is non-nil its values are used verbatim, with one guard: a non-positive
+// ExecutionTimeout is replaced by the default. A zero timeout would make the
+// analysis context expire immediately and kill ffprobe/ffmpeg on every call,
+// and unlike the loudness parameters (where 0.0 is a legal in-range value) a
+// zero/negative timeout is never a meaningful choice.
 func NewCalculator(opts *CalculatorOptions) *Calculator {
 	if opts == nil {
 		opts = &CalculatorOptions{
@@ -103,6 +128,12 @@ func NewCalculator(opts *CalculatorOptions) *Calculator {
 			Drop:             defaultSustainedLoudnessDrop,
 		}
 	}
+	if opts.ExecutionTimeout <= 0 {
+		opts.ExecutionTimeout = defaultExecutionTimeout
+	}
+	if opts.Diagnostics == nil {
+		opts.Diagnostics = os.Stderr
+	}
 	return &Calculator{
 		executionTimeout: opts.ExecutionTimeout,
 		targetLoudness:   opts.TargetLoudness,
@@ -113,6 +144,7 @@ func NewCalculator(opts *CalculatorOptions) *Calculator {
 		extra:            opts.Extra,
 		drop:             opts.Drop,
 		noClip:           opts.NoClip,
+		diag:             opts.Diagnostics,
 	}
 }
 
@@ -127,6 +159,25 @@ type Calculator struct {
 	extra            float64
 	drop             float64
 	noClip           bool
+	// diag is where scan progress/analysis messages are written (never nil
+	// after NewCalculator; defaults to os.Stderr).
+	diag io.Writer
+}
+
+// diagW returns the diagnostics writer, falling back to os.Stderr so a
+// zero-value Calculator (constructed without NewCalculator, e.g. in tests) is
+// still safe to write to.
+func (c *Calculator) diagW() io.Writer {
+	if c.diag == nil {
+		return os.Stderr
+	}
+	return c.diag
+}
+
+// diagf writes a best-effort progress/analysis line to the diagnostics writer.
+// Diagnostics are informational, so a write error is intentionally ignored.
+func (c *Calculator) diagf(format string, args ...any) {
+	_, _ = fmt.Fprintf(c.diagW(), format, args...)
 }
 
 // Calc returns actual results
@@ -189,12 +240,12 @@ func (c *Calculator) probe(pathToFile string) (map[string]string, error) {
 			tags["duration"] = probed.Format.Duration
 		}
 		for key, val := range s.Tags {
-			if !slices.Contains(verifyTags, key) {
+			if _, keep := verifyTags[key]; !keep {
 				continue
 			}
 			clean, err := takePureValue(key, val)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "tag read error: %s\n", err.Error())
+				c.diagf("tag read error: %s\n", err.Error())
 				continue
 			}
 			tags[key] = clean
@@ -255,18 +306,7 @@ func (c *Calculator) adjustLoudness(tags map[string]string) {
 }
 
 func takePureValue(key, val string) (string, error) {
-	var needsCleaning = []string{
-		"liq_amplify",
-		"liq_amplify_adjustment",
-		"liq_loudness",
-		"liq_loudness_range",
-		"liq_reference_loudness",
-		"replaygain_track_gain",
-		"replaygain_track_range",
-		"replaygain_reference_loudness",
-		"liq_true_peak_db",
-	}
-	if !slices.Contains(needsCleaning, key) {
+	if _, ok := needsCleaning[key]; !ok {
 		return val, nil
 	}
 	res := digitalValRegex.FindStringSubmatch(val)

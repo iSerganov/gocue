@@ -1,6 +1,8 @@
 package cue
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -166,8 +168,14 @@ func (s *CalculatorSuite) TestParseTagsReferenceLoudness() {
 		"liq_reference_loudness": "-18.0",
 		"liq_true_peak_db":       "-1.2",
 	})
-	s.Equal("-18.000 LUFS", res.ReferenceLoudness)
-	s.Equal("-1.200 dBFS", res.TruePeakDb)
+	s.InDelta(-18.0, res.ReferenceLoudness, 1e-9)
+	s.InDelta(-1.2, res.TruePeakDb, 1e-9)
+	// the presentation form (unit suffix, 3-decimal precision) is applied at
+	// the serialization boundary
+	ann, err := res.Annotations()
+	s.Require().NoError(err)
+	s.Equal("-18.000 LUFS", ann["liq_reference_loudness"])
+	s.Equal("-1.200 dBFS", ann["liq_true_peak_db"])
 }
 
 // TestScanConcurrent runs the full pipeline on the fixtures from many goroutines
@@ -209,6 +217,147 @@ func (s *CalculatorSuite) TestScanConcurrent() {
 	}
 }
 
+// TestNewCalculatorDefaults covers the §1.1 fix (per-field ExecutionTimeout
+// guard) and the §4.2 diagnostics-writer wiring.
+func (s *CalculatorSuite) TestNewCalculatorDefaults() {
+	s.Run("nil opts gets full defaults", func() {
+		c := NewCalculator(nil)
+		s.Equal(defaultExecutionTimeout, c.executionTimeout)
+		s.Equal(defaultTargetLUFS, c.targetLoudness)
+		s.NotNil(c.diag, "diagnostics writer must default to non-nil")
+	})
+
+	s.Run("partial opts still gets a usable timeout", func() {
+		// only loudness set: a zero ExecutionTimeout would otherwise make the
+		// analysis context expire immediately
+		c := NewCalculator(&CalculatorOptions{TargetLoudness: -12.0})
+		s.Equal(defaultExecutionTimeout, c.executionTimeout)
+		s.Equal(-12.0, c.targetLoudness)
+		s.NotNil(c.diag)
+	})
+
+	s.Run("explicit in-range zero loudness is preserved", func() {
+		c := NewCalculator(&CalculatorOptions{ExecutionTimeout: time.Second, TargetLoudness: 0.0})
+		s.Equal(0.0, c.targetLoudness, "an explicit 0.0 target must not be overridden")
+	})
+
+	s.Run("custom diagnostics writer is honored", func() {
+		var buf bytes.Buffer
+		c := NewCalculator(&CalculatorOptions{Diagnostics: &buf})
+		s.Equal(&buf, c.diag)
+	})
+}
+
+// TestCalcAmplify covers the gain math, including the --noclip clipping branch
+// (§5) which is otherwise unexercised.
+func (s *CalculatorSuite) TestCalcAmplify() {
+	s.Run("no clip: amplify is target minus loudness", func() {
+		c := &Calculator{targetLoudness: -18.0, noClip: false}
+		amp, corr := c.calcAmplify(-20.0, -3.0)
+		s.InDelta(2.0, amp, 1e-9)
+		s.InDelta(0.0, corr, 1e-9)
+	})
+
+	s.Run("noclip active and peak would clip: gain is reduced", func() {
+		c := &Calculator{targetLoudness: -8.0, noClip: true}
+		// amplify = -8 - (-10) = 2.0; maxAmplify = -1 - (-0.5) = -0.5
+		amp, corr := c.calcAmplify(-10.0, -0.5)
+		s.InDelta(-0.5, amp, 1e-9)
+		s.InDelta(-2.5, corr, 1e-9) // maxAmplify - amplify
+	})
+
+	s.Run("noclip active but no clipping needed: gain unchanged", func() {
+		c := &Calculator{targetLoudness: -18.0, noClip: true}
+		amp, corr := c.calcAmplify(-10.0, -20.0)
+		s.InDelta(-8.0, amp, 1e-9)
+		s.InDelta(0.0, corr, 1e-9)
+	})
+}
+
+// TestDoPreAnalysis covers the cached fast-path decision (§5): a complete tag
+// set skips re-analysis and recomputes liq_amplify, while a missing tag returns
+// ErrRequireAnalysis.
+func (s *CalculatorSuite) TestDoPreAnalysis() {
+	fullTags := func() map[string]string {
+		return map[string]string{
+			"duration":               "100",
+			"liq_cue_in":             "0.0",
+			"liq_cue_out":            "99.0",
+			"liq_cross_start_next":   "98.0",
+			"replaygain_track_gain":  "-5.0",
+			"liq_amplify":            "-5.0",
+			"liq_reference_loudness": "-16.0",
+			"liq_true_peak":          "0.9",
+			"liq_true_peak_db":       "-1.0",
+			"liq_loudness":           "-14.0",
+			"liq_loudness_range":     "7.0",
+		}
+	}
+
+	s.Run("complete tags skip analysis and recompute amplify", func() {
+		c := NewCalculator(nil) // target -18, noClip false
+		tags := fullTags()
+		err := c.doPreAnalysis(tags)
+		s.NoError(err)
+		// liq_amplify = target - loudness = -18 - (-14) = -4
+		s.Equal("-4.000", tags["liq_amplify"])
+		s.Equal("0.000", tags["liq_amplify_adjustment"])
+		// reference loudness is rewritten to the requested target
+		s.Equal("-18.000", tags["liq_reference_loudness"])
+	})
+
+	s.Run("missing base tag requires re-analysis", func() {
+		c := NewCalculator(nil)
+		err := c.doPreAnalysis(map[string]string{})
+		s.Error(err)
+		var reqErr ErrRequireAnalysis
+		s.True(errors.As(err, &reqErr), "expected ErrRequireAnalysis, got %T", err)
+	})
+
+	s.Run("changed blankskip requires re-analysis", func() {
+		c := NewCalculator(&CalculatorOptions{BlankSkip: 3.0})
+		tags := fullTags()
+		tags["liq_blankskip"] = "1.0" // differs from requested 3.0
+		err := c.doPreAnalysis(tags)
+		s.Error(err)
+		var reqErr ErrRequireAnalysis
+		s.True(errors.As(err, &reqErr))
+	})
+}
+
+// TestCalcMissingFile covers the error path (§5): a non-existent input must
+// surface an error rather than panicking. Works whether or not ffprobe is
+// installed (missing binary and missing file both yield an error).
+func (s *CalculatorSuite) TestCalcMissingFile() {
+	c := NewCalculator(nil)
+	c.executionTimeout = 5 * time.Second
+	_, err := c.Calc("test_data/definitely_does_not_exist.wav")
+	s.Error(err)
+}
+
+// TestScanBlankSkip exercises the --blankskip code path (§1.3 / §5), which the
+// default-options regression test never hits, and doubles as coverage for the
+// injectable diagnostics writer (§4.2). It only checks that the path runs
+// cleanly and emits diagnostics; exact blank values are not pinned since there
+// is no upstream reference for this fixture with blankskip enabled.
+func (s *CalculatorSuite) TestScanBlankSkip() {
+	file := "test_data/sample.ogg"
+	if _, err := os.Stat(file); err != nil {
+		s.T().Skipf("fixture %s not available", file)
+	}
+	var buf bytes.Buffer
+	calc := NewCalculator(nil)
+	calc.executionTimeout = 30 * time.Second
+	calc.blankSkip = 2.0
+	calc.diag = &buf
+
+	res, err := calc.scan(file)
+	s.Require().NoError(err)
+	s.Require().NotNil(res)
+	s.Equal(2.0, res.BlankSkip)
+	s.Positive(buf.Len(), "scan should write diagnostics to the injected writer")
+}
+
 func BenchmarkScan(b *testing.B) {
 	calculator := Calculator{targetLoudness: -16.4, executionTimeout: 5 * time.Second}
 
@@ -241,6 +390,6 @@ lavfi.r128.true_peaks_ch0=0.123 lavfi.r128.LRA=5.2`
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		reader := strings.NewReader(sampleData)
-		_, _, _ = calculator.parseFFmpegOutput(reader)
+		_, _, _, _ = calculator.parseFFmpegOutput(reader)
 	}
 }

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -34,7 +33,7 @@ var (
 
 // scan runs a full ffmpeg ebur128 analysis of the file and derives all cueing
 // and loudness values from the per-frame momentary loudness measurements.
-func (c Calculator) scan(filename string) (*Result, error) {
+func (c *Calculator) scan(filename string) (*Result, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), c.executionTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, ffmpeg,
@@ -57,7 +56,13 @@ func (c Calculator) scan(filename string) (*Result, error) {
 	if err = cmd.Start(); err != nil {
 		return nil, err
 	}
-	frames, loudness, lastTPLR := c.parseFFmpegOutput(filterOutput)
+	frames, loudness, lastTPLR, err := c.parseFFmpegOutput(filterOutput)
+	if err != nil {
+		// a scanner failure (e.g. an over-long line) means we may have only
+		// partial output; drain and reap the process, then surface the error
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("failed to read ffmpeg output for %q: %w", filename, err)
+	}
 	// the pipe is fully drained above; reap the process and surface any failure
 	// instead of leaking it and silently using partial output
 	if err := cmd.Wait(); err != nil {
@@ -163,7 +168,7 @@ func (c Calculator) scan(filename string) (*Result, error) {
 	startNextTimeSustained := 0.0
 	if startNextIdx < end {
 		lufsRatioPct, endLufs := calcEnding(frames[startNextIdx:end])
-		fmt.Fprintf(os.Stderr, "Overlay: %.2f LUFS, Longtail: %.2f LUFS, Measured end avg: %.2f LUFS, Drop: %.2f%%\n",
+		c.diagf("Overlay: %.2f LUFS, Longtail: %.2f LUFS, Measured end avg: %.2f LUFS, Drop: %.2f%%\n",
 			loudness+c.overlay, loudness+c.overlay+c.extra, endLufs, lufsRatioPct)
 		if lufsRatioPct < c.drop {
 			sustained = true
@@ -174,7 +179,7 @@ func (c Calculator) scan(filename string) (*Result, error) {
 			startNextTimeSustained = math.Max(startNextTimeSustained, cueOutTime-startNextTimeSustained)
 		}
 	} else {
-		fmt.Fprintf(os.Stderr, "Already at end of track (badly cut?), no ending to analyse.\n")
+		c.diagf("Already at end of track (badly cut?), no ending to analyse.\n")
 	}
 
 	// Long tail: if the computed overlap is longer than longtailSeconds, re-find
@@ -192,10 +197,10 @@ func (c Calculator) scan(filename string) (*Result, error) {
 
 	// Use the latest of the three overlap candidates (keeps endings intact).
 	startNextTimeNew := math.Max(math.Max(startNextTime, startNextTimeSustained), startNextTimeLongtail)
-	fmt.Fprintf(os.Stderr, "Overlay times: %.2f/%.2f/%.2f s (normal/sustained/longtail), using: %.2fs.\n",
+	c.diagf("Overlay times: %.2f/%.2f/%.2f s (normal/sustained/longtail), using: %.2fs.\n",
 		startNextTime, startNextTimeSustained, startNextTimeLongtail, startNextTimeNew)
 	startNextTime = startNextTimeNew
-	fmt.Fprintf(os.Stderr, "Cue out time: %.2f s\n", cueOutTime)
+	c.diagf("Cue out time: %.2f s\n", cueOutTime)
 
 	amplify, amplifyCorrection := c.calcAmplify(loudness, truePeakDb)
 
@@ -206,16 +211,16 @@ func (c Calculator) scan(filename string) (*Result, error) {
 		CrossStartNext:    startNextTime,
 		LongTail:          longtail,
 		SustainedEnding:   sustained,
-		Loudness:          fmt.Sprintf("%.3f LUFS", loudness),
-		LoudnessRange:     fmt.Sprintf("%.3f LU", loudnessRange),
-		Amplify:           fmt.Sprintf("%.3f dB", amplify),
-		AmplifyAdjustment: fmt.Sprintf("%.3f dB", amplifyCorrection),
-		ReferenceLoudness: fmt.Sprintf("%.3f LUFS", c.targetLoudness),
+		Loudness:          loudness,
+		LoudnessRange:     loudnessRange,
+		Amplify:           amplify,
+		AmplifyAdjustment: amplifyCorrection,
+		ReferenceLoudness: c.targetLoudness,
 		BlankSkip:         c.blankSkip,
 		BlankSkipped:      blankSkipped,
 		Duration:          duration,
 		TruePeak:          truePeak,
-		TruePeakDb:        fmt.Sprintf("%.3f dBFS", truePeakDb),
+		TruePeakDb:        truePeakDb,
 	}, nil
 }
 
@@ -288,7 +293,7 @@ func calcEnding(elements []Frame) (lufsRatioPct, endLufs float64) {
 // they are tracked separately and returned: lastIntegrated holds the most recent
 // integrated loudness ("I") and lastTPLR the most recent true-peak/LRA line(s),
 // both belonging to the last frame seen.
-func (c *Calculator) parseFFmpegOutput(reader io.Reader) (frames []Frame, lastIntegrated float64, lastTPLR string) {
+func (c *Calculator) parseFFmpegOutput(reader io.Reader) (frames []Frame, lastIntegrated float64, lastTPLR string, err error) {
 	frames = make([]Frame, 0, initialFrameCapacity)
 
 	scanner := bufio.NewScanner(reader)
@@ -332,7 +337,12 @@ func (c *Calculator) parseFFmpegOutput(reader io.Reader) (frames []Frame, lastIn
 		}
 	}
 
-	return frames, lastIntegrated, lastTPLR
+	// surface read errors (e.g. bufio.ErrTooLong on an over-long line) so the
+	// caller doesn't silently proceed on a truncated frame list
+	if err := scanner.Err(); err != nil {
+		return frames, lastIntegrated, lastTPLR, err
+	}
+	return frames, lastIntegrated, lastTPLR, nil
 }
 
 // firstIndexAboveFromEnd scans frames[start:end] backwards and returns the index
