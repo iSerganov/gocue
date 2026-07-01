@@ -8,8 +8,34 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Result - CUE calculations data
+// Result - CUE calculations data.
+//
+// All measured quantities are stored as plain float64 numbers (in their natural
+// units, noted per field) so callers can consume them arithmetically without
+// re-parsing. The unit-suffixed presentation form used by the Liquidsoap
+// "autocue:" protocol (e.g. "-18.000 LUFS") is produced only at the
+// serialization boundary — see resultDTO / MarshalJSON — so the JSON and YAML
+// output remains byte-for-byte identical to the upstream reference.
 type Result struct {
+	Duration          float64 // seconds
+	CueDuration       float64 // seconds
+	CueIn             float64 // seconds
+	CueOut            float64 // seconds
+	CrossStartNext    float64 // seconds
+	LongTail          bool
+	SustainedEnding   bool
+	Loudness          float64 // LUFS
+	LoudnessRange     float64 // LU
+	Amplify           float64 // dB
+	AmplifyAdjustment float64 // dB
+	ReferenceLoudness float64 // LUFS
+	BlankSkip         float64 // seconds
+	BlankSkipped      bool
+	TruePeak          float64 // linear
+	TruePeakDb        float64 // dBFS
+}
+
+type resultDTO struct {
 	Duration          float64 `json:"duration" yaml:"duration"`
 	CueDuration       float64 `json:"liq_cue_duration" yaml:"liq_cue_duration"`
 	CueIn             float64 `json:"liq_cue_in" yaml:"liq_cue_in"`
@@ -28,49 +54,69 @@ type Result struct {
 	TruePeakDb        string  `json:"liq_true_peak_db" yaml:"liq_true_peak_db"`
 }
 
+// dto converts the numeric Result into its unit-suffixed wire form. This is the
+// single place the presentation strings are built, so JSON, YAML and
+// Annotations all stay in sync.
+func (r *Result) dto() resultDTO {
+	return resultDTO{
+		Duration:          r.Duration,
+		CueDuration:       r.CueDuration,
+		CueIn:             r.CueIn,
+		CueOut:            r.CueOut,
+		CrossStartNext:    r.CrossStartNext,
+		LongTail:          r.LongTail,
+		SustainedEnding:   r.SustainedEnding,
+		Loudness:          fmt.Sprintf("%.3f LUFS", r.Loudness),
+		LoudnessRange:     fmt.Sprintf("%.3f LU", r.LoudnessRange),
+		Amplify:           fmt.Sprintf("%.3f dB", r.Amplify),
+		AmplifyAdjustment: fmt.Sprintf("%.3f dB", r.AmplifyAdjustment),
+		ReferenceLoudness: fmt.Sprintf("%.3f LUFS", r.ReferenceLoudness),
+		BlankSkip:         r.BlankSkip,
+		BlankSkipped:      r.BlankSkipped,
+		TruePeak:          r.TruePeak,
+		TruePeakDb:        fmt.Sprintf("%.3f dBFS", r.TruePeakDb),
+	}
+}
+
 // MarshalYAML - returns yaml
 func (r *Result) MarshalYAML() (out []byte, err error) {
-	return yaml.Marshal(*r)
+	return yaml.Marshal(r.dto())
 }
 
 // MarshalJSON - returns json
 func (r *Result) MarshalJSON() (out []byte, err error) {
-	return json.Marshal(*r)
+	return json.Marshal(r.dto())
 }
 
 // MarshalNiceJSON - returns pretty formatted json
 func (r *Result) MarshalNiceJSON() (out []byte, err error) {
-	return json.MarshalIndent(*r, " ", " ")
+	return json.MarshalIndent(r.dto(), " ", " ")
 }
 
-// Annotations - unmarshaled JSON as map of strings
-func (r *Result) Annotations() (out map[string]string, err error) {
-	// marshal annotations into bytes
-	calcBytes, err := r.MarshalJSON()
-	if err != nil {
-		return nil, err
-	}
-
-	// convert bytes annotations into map
-	anyMap := map[string]any{}
-	err = json.Unmarshal(calcBytes, &anyMap)
-	if err != nil {
-		return nil, err
-	}
-	res := map[string]string{}
-	for key, val := range anyMap {
-		switch v := val.(type) {
-		case string:
-			res[key] = v
-		case float64:
-			res[key] = fmt.Sprintf("%.3f", v)
-		case bool:
-			res[key] = fmt.Sprintf("%t", v)
-		default:
-			res[key] = "N/A"
-		}
-	}
-	return res, nil
+// Annotations - result as a map of stringified values, keyed by the same tag
+// names used for JSON. Numeric fields without a unit use 3-decimal precision and
+// bools "true"/"false"; the loudness/gain fields carry their unit suffix, all
+// matching the JSON output.
+func (r *Result) Annotations() (map[string]string, error) {
+	d := r.dto()
+	return map[string]string{
+		"duration":               fmt.Sprintf("%.3f", d.Duration),
+		"liq_cue_duration":       fmt.Sprintf("%.3f", d.CueDuration),
+		"liq_cue_in":             fmt.Sprintf("%.3f", d.CueIn),
+		"liq_cue_out":            fmt.Sprintf("%.3f", d.CueOut),
+		"liq_cross_start_next":   fmt.Sprintf("%.3f", d.CrossStartNext),
+		"liq_longtail":           fmt.Sprintf("%t", d.LongTail),
+		"liq_sustained_ending":   fmt.Sprintf("%t", d.SustainedEnding),
+		"liq_loudness":           d.Loudness,
+		"liq_loudness_range":     d.LoudnessRange,
+		"liq_amplify":            d.Amplify,
+		"liq_amplify_adjustment": d.AmplifyAdjustment,
+		"liq_reference_loudness": d.ReferenceLoudness,
+		"liq_blankskip":          fmt.Sprintf("%.3f", d.BlankSkip),
+		"liq_blank_skipped":      fmt.Sprintf("%t", d.BlankSkipped),
+		"liq_true_peak":          fmt.Sprintf("%.3f", d.TruePeak),
+		"liq_true_peak_db":       d.TruePeakDb,
+	}, nil
 }
 
 // parseTags builds a Result from existing file tags (the cached/fast path that
@@ -101,14 +147,14 @@ func parseTags(tags map[string]string) *Result {
 		CrossStartNext:    crossStartNext,
 		LongTail:          longtail,
 		SustainedEnding:   sustainedEnding,
-		Loudness:          fmt.Sprintf("%.3f LUFS", loudness),
-		LoudnessRange:     fmt.Sprintf("%.3f LU", loudnessRange),
-		Amplify:           fmt.Sprintf("%.3f dB", amplify),
-		AmplifyAdjustment: fmt.Sprintf("%.3f dB", amplifyCorrection),
-		ReferenceLoudness: fmt.Sprintf("%.3f LUFS", referenceLoudness),
+		Loudness:          loudness,
+		LoudnessRange:     loudnessRange,
+		Amplify:           amplify,
+		AmplifyAdjustment: amplifyCorrection,
+		ReferenceLoudness: referenceLoudness,
 		BlankSkip:         blankSkip,
 		BlankSkipped:      blankSkipped,
 		TruePeak:          truePeak,
-		TruePeakDb:        fmt.Sprintf("%.3f dBFS", truePeakDb),
+		TruePeakDb:        truePeakDb,
 	}
 }
