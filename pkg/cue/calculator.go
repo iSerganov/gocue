@@ -3,6 +3,7 @@ package cue
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -180,7 +181,11 @@ func (c *Calculator) diagf(format string, args ...any) {
 	_, _ = fmt.Fprintf(c.diagW(), format, args...)
 }
 
-// Calc returns actual results
+// Calc returns cue/loudness results for pathToFile. It prefers existing tags
+// when doPreAnalysis succeeds; otherwise it runs a full ffmpeg scan. Only
+// ErrRequireAnalysis triggers a scan — other pre-analysis errors propagate.
+// After a scan, Duration is overridden with the precise probe value when
+// available (frame-derived duration is a coarse fallback).
 func (c *Calculator) Calc(pathToFile string) (*Result, error) {
 	tags, err := c.probe(pathToFile)
 	if err != nil {
@@ -192,7 +197,52 @@ func (c *Calculator) Calc(pathToFile string) (*Result, error) {
 		c.adjustLoudness(tags)
 		return parseTags(tags), nil
 	}
-	return c.scan(pathToFile)
+	var needScan ErrRequireAnalysis
+	if !errors.As(err, &needScan) {
+		return nil, err
+	}
+	result, err := c.scan(pathToFile)
+	if err != nil {
+		return nil, err
+	}
+	applyProbeDuration(result, tags)
+	return result, nil
+}
+
+// applyProbeDuration replaces the scan-derived duration with the container /
+// stream duration from probe tags when that value parses cleanly.
+func applyProbeDuration(result *Result, tags map[string]string) {
+	if result == nil {
+		return
+	}
+	raw, ok := tags["duration"]
+	if !ok || raw == "" {
+		return
+	}
+	dur, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return
+	}
+	result.Duration = dur
+}
+
+// probePayload is the typed shape of ffprobe -of json output we care about.
+// Format.Tags are essential for containers (FLAC, MP3, …) that store metadata
+// at the container level rather than on the audio stream.
+type probePayload struct {
+	Streams []probeStream `json:"streams"`
+	Format  probeFormat   `json:"format"`
+}
+
+type probeStream struct {
+	CodecType string            `json:"codec_type"`
+	Duration  string            `json:"duration"`
+	Tags      map[string]string `json:"tags"`
+}
+
+type probeFormat struct {
+	Duration string            `json:"duration"`
+	Tags     map[string]string `json:"tags"`
 }
 
 func (c *Calculator) probe(pathToFile string) (map[string]string, error) {
@@ -209,49 +259,62 @@ func (c *Calculator) probe(pathToFile string) (map[string]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ffprobe failed for %q: %w", pathToFile, err)
 	}
-
-	// ffprobe always emits tag values as JSON strings, so decode straight into
-	// a typed struct instead of map[string]any + unchecked type assertions
-	// (the latter panic on e.g. OGG/Opus, where stream duration is often absent).
-	var probed struct {
-		Streams []struct {
-			CodecType string            `json:"codec_type"`
-			Duration  string            `json:"duration"`
-			Tags      map[string]string `json:"tags"`
-		} `json:"streams"`
-		Format struct {
-			Duration string `json:"duration"`
-		} `json:"format"`
-	}
-	if err := json.Unmarshal(res, &probed); err != nil {
+	tags, err := c.tagsFromProbeJSON(res)
+	if err != nil {
 		return nil, fmt.Errorf("cannot parse ffprobe output for %q: %w", pathToFile, err)
 	}
+	return tags, nil
+}
 
+// tagsFromProbeJSON decodes ffprobe JSON and merges format-level and
+// audio-stream tags. Format tags are applied first (container metadata), then
+// each audio stream overlays its own tags and duration so stream-specific
+// values win on conflict. Non-audio streams are ignored.
+func (c *Calculator) tagsFromProbeJSON(data []byte) (map[string]string, error) {
+	var probed probePayload
+	if err := json.Unmarshal(data, &probed); err != nil {
+		return nil, err
+	}
+	return c.tagsFromProbe(probed), nil
+}
+
+func (c *Calculator) tagsFromProbe(probed probePayload) map[string]string {
 	tags := make(map[string]string)
+
+	// Container duration and tags first — many formats (FLAC, MP3, M4A, …)
+	// only expose ReplayGain / liq_* metadata at the format level.
+	if probed.Format.Duration != "" {
+		tags["duration"] = probed.Format.Duration
+	}
+	c.mergeVerifiedTags(tags, probed.Format.Tags)
+
 	for _, s := range probed.Streams {
 		if s.CodecType != "audio" {
 			continue
 		}
-		// stream-level duration is often missing for containers like OGG/Opus;
-		// fall back to the container (format) duration in that case
+		// Prefer stream duration when present; otherwise keep format duration.
 		if s.Duration != "" {
 			tags["duration"] = s.Duration
-		} else if probed.Format.Duration != "" {
-			tags["duration"] = probed.Format.Duration
 		}
-		for key, val := range s.Tags {
-			if _, keep := verifyTags[key]; !keep {
-				continue
-			}
-			clean, err := takePureValue(key, val)
-			if err != nil {
-				c.diagf("tag read error: %s\n", err.Error())
-				continue
-			}
-			tags[key] = clean
-		}
+		c.mergeVerifiedTags(tags, s.Tags)
 	}
-	return tags, nil
+	return tags
+}
+
+// mergeVerifiedTags copies keys listed in verifyTags into dst, cleaning
+// unit-suffixed values. Invalid values are skipped with a diagnostic line.
+func (c *Calculator) mergeVerifiedTags(dst map[string]string, src map[string]string) {
+	for key, val := range src {
+		if _, keep := verifyTags[key]; !keep {
+			continue
+		}
+		clean, err := takePureValue(key, val)
+		if err != nil {
+			c.diagf("tag read error: %s\n", err.Error())
+			continue
+		}
+		dst[key] = clean
+	}
 }
 
 func (c *Calculator) adjustLoudness(tags map[string]string) {
@@ -365,18 +428,37 @@ func (c *Calculator) doPreAnalysis(tags map[string]string) error {
 	tags["liq_amplify"] = fmt.Sprintf("%.3f", liqAmplifyVal)
 	tags["liq_amplify_adjustment"] = fmt.Sprintf("%.3f", liqAmplifyAdjVal)
 
-	// if liq_blankskip differs from requested, we need a re-analysis
-	if liqBlankSkip, ok := tags["liq_blankskip"]; ok {
-		liqBlankSkipVal, err := strconv.ParseFloat(liqBlankSkip, 64)
-		if err == nil && liqBlankSkipVal != c.blankSkip {
-			return ErrRequireAnalysis{inner: fmt.Errorf("liq_blankskip is different from the requested one")}
-		}
+	// blankskip changes cue-out; never trust cached cues when the requested
+	// blankskip is non-zero but the tag is missing, or when the stored value
+	// differs from what the caller asked for.
+	if err := c.checkBlankSkip(tags); err != nil {
+		return err
 	}
 
 	// liq_loudness_range is only informational but we want to show correct values;
 	// we can't blindly take replaygain_track_range—it might be in a different unit
 	if _, ok := tags["liq_loudness_range"]; !ok {
 		return ErrRequireAnalysis{inner: fmt.Errorf("tag liq_loudness_range is missing")}
+	}
+	return nil
+}
+
+// checkBlankSkip returns ErrRequireAnalysis when cached tags cannot be reused
+// for the requested blank-skip setting.
+func (c *Calculator) checkBlankSkip(tags map[string]string) error {
+	liqBlankSkip, ok := tags["liq_blankskip"]
+	if !ok {
+		if c.blankSkip != 0 {
+			return ErrRequireAnalysis{inner: fmt.Errorf("tag liq_blankskip is missing but blankskip %.3f was requested", c.blankSkip)}
+		}
+		return nil
+	}
+	liqBlankSkipVal, err := strconv.ParseFloat(liqBlankSkip, 64)
+	if err != nil {
+		return ErrRequireAnalysis{inner: fmt.Errorf("cannot parse liq_blankskip: %w", err)}
+	}
+	if liqBlankSkipVal != c.blankSkip {
+		return ErrRequireAnalysis{inner: fmt.Errorf("liq_blankskip is different from the requested one")}
 	}
 	return nil
 }

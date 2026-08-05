@@ -32,6 +32,84 @@ func (s *CalculatorSuite) TestProbe() {
 	fmt.Printf("gocue probing returned %+v\n", res)
 }
 
+// TestTagsFromProbeJSON verifies format-level tags are merged (FLAC/MP3-style
+// containers) and that audio-stream tags overlay them on key conflicts.
+func (s *CalculatorSuite) TestTagsFromProbeJSON() {
+	calc := NewCalculator(nil)
+
+	s.Run("format tags alone enable cache fields", func() {
+		raw := []byte(`{
+			"streams":[{"codec_type":"audio","duration":"12.5","tags":{}}],
+			"format":{
+				"duration":"12.345",
+				"tags":{
+					"liq_cue_in":"0.100",
+					"liq_cue_out":"12.000",
+					"liq_cross_start_next":"11.500",
+					"replaygain_track_gain":"-3.200 dB",
+					"ignored_artist":"should not appear"
+				}
+			}
+		}`)
+		tags, err := calc.tagsFromProbeJSON(raw)
+		s.NoError(err)
+		s.Equal("12.5", tags["duration"], "stream duration should win over format")
+		s.Equal("0.100", tags["liq_cue_in"])
+		s.Equal("12.000", tags["liq_cue_out"])
+		s.Equal("11.500", tags["liq_cross_start_next"])
+		s.Equal("-3.200", tags["replaygain_track_gain"], "unit suffix must be stripped")
+		_, hasArtist := tags["ignored_artist"]
+		s.False(hasArtist)
+	})
+
+	s.Run("stream tags overlay format tags", func() {
+		raw := []byte(`{
+			"streams":[{
+				"codec_type":"audio",
+				"duration":"",
+				"tags":{"liq_cue_in":"1.000","liq_loudness":"-14.000 LUFS"}
+			}],
+			"format":{
+				"duration":"99.0",
+				"tags":{"liq_cue_in":"0.000","liq_cue_out":"98.0"}
+			}
+		}`)
+		tags, err := calc.tagsFromProbeJSON(raw)
+		s.NoError(err)
+		s.Equal("99.0", tags["duration"], "format duration used when stream duration empty")
+		s.Equal("1.000", tags["liq_cue_in"], "stream tag should override format")
+		s.Equal("98.0", tags["liq_cue_out"])
+		s.Equal("-14.000", tags["liq_loudness"])
+	})
+
+	s.Run("non-audio streams are ignored", func() {
+		raw := []byte(`{
+			"streams":[
+				{"codec_type":"video","duration":"1.0","tags":{"liq_cue_in":"9.9"}},
+				{"codec_type":"audio","duration":"5.0","tags":{"liq_cue_in":"0.2"}}
+			],
+			"format":{"duration":"5.0","tags":{}}
+		}`)
+		tags, err := calc.tagsFromProbeJSON(raw)
+		s.NoError(err)
+		s.Equal("0.2", tags["liq_cue_in"])
+		s.Equal("5.0", tags["duration"])
+	})
+}
+
+// TestApplyProbeDuration covers the post-scan duration override.
+func (s *CalculatorSuite) TestApplyProbeDuration() {
+	res := &Result{Duration: 10.1}
+	applyProbeDuration(res, map[string]string{"duration": "10.123456"})
+	s.InDelta(10.123456, res.Duration, 1e-9)
+
+	res = &Result{Duration: 10.1}
+	applyProbeDuration(res, map[string]string{"duration": "not-a-number"})
+	s.InDelta(10.1, res.Duration, 1e-9, "invalid probe duration must leave scan value")
+
+	applyProbeDuration(nil, map[string]string{"duration": "1.0"}) // must not panic
+}
+
 func (s *CalculatorSuite) TestTakePureValue() {
 	tests := []struct {
 		title string
@@ -322,6 +400,25 @@ func (s *CalculatorSuite) TestDoPreAnalysis() {
 		s.Error(err)
 		var reqErr ErrRequireAnalysis
 		s.True(errors.As(err, &reqErr))
+	})
+
+	s.Run("missing blankskip with requested blankskip requires re-analysis", func() {
+		c := NewCalculator(&CalculatorOptions{BlankSkip: 2.5})
+		tags := fullTags()
+		delete(tags, "liq_blankskip")
+		err := c.doPreAnalysis(tags)
+		s.Error(err)
+		var reqErr ErrRequireAnalysis
+		s.True(errors.As(err, &reqErr), "expected ErrRequireAnalysis, got %T: %v", err, err)
+		s.Contains(err.Error(), "liq_blankskip is missing")
+	})
+
+	s.Run("missing blankskip with zero blankskip still allows cache", func() {
+		c := NewCalculator(nil) // blankSkip defaults to 0
+		tags := fullTags()
+		delete(tags, "liq_blankskip")
+		err := c.doPreAnalysis(tags)
+		s.NoError(err)
 	})
 }
 

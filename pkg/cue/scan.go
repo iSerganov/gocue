@@ -77,8 +77,8 @@ func (c *Calculator) scan(filename string) (*Result, error) {
 
 	truePeak, truePeakDb, loudnessRange := parseTruePeakAndRange(lastTPLR)
 
-	// internal duration from the last analysed frame, rounded to 2 decimals (the
-	// reported duration is overridden with the precise probe value in Calc)
+	// Coarse duration from the last analysed frame (ebur128 steps ~100ms).
+	// Calc overrides this with the precise probe duration when available.
 	duration := math.Round((frames[len(frames)-1].PTSTime+0.1)*100) / 100
 
 	// Find cue-in: first frame whose momentary loudness exceeds "silence".
