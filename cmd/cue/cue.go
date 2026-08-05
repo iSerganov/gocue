@@ -101,8 +101,11 @@ func (o *options) run(cmd *cobra.Command, file string) error {
 	}
 
 	if o.printFlags {
+		// Keep stdout reserved for machine-readable JSON (Liquidsoap pipes).
+		errOut := cmd.ErrOrStderr()
 		cmd.Flags().VisitAll(func(f *pflag.Flag) {
-			fmt.Printf("Flag: %s, Value: %v\n", f.Name, f.Value)
+			// Diagnostics only; a failed write to stderr must not affect the run.
+			_, _ = fmt.Fprintf(errOut, "Flag: %s, Value: %v\n", f.Name, f.Value)
 		})
 	}
 
