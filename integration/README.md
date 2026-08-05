@@ -5,7 +5,8 @@ against the `gocue` binary, with fixtures under `testdata/`.
 
 ## Requirements
 
-- `liquidsoap` (≥ 2.2.5; developed against 2.4.x)
+- `liquidsoap` (≥ 2.3.0; developed against 2.4.5). Ubuntu 24.04 packages 2.2.4,
+  which is too old; CI installs an official release `.deb`.
 - `ffmpeg` / `ffprobe`
 - Go toolchain (builds `integration/.bin/gocue` automatically)
 
@@ -44,7 +45,7 @@ integration/
 - `annotate:` metadata overrides (e.g. `liq_fade_out`)
 - Tag write-back via the Liquidsoap script (`write_tags` → ffmpeg) and
   ffprobe round-trip
-- Skip path when `liq_gocue=false`
+- Skip path when `liq_cue_file=false`
 - Full metadata for every track in `testdata/free/` via `harness.liq`
 - Playlist playback order on `station.liq`
 

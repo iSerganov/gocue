@@ -57,7 +57,7 @@ func prepareEnv() error {
 	gocueBin = filepath.Join(outDir, "gocue")
 	build := exec.Command("go", "build",
 		"-o", gocueBin,
-		"-ldflags", "-X github.com/iSerganov/gocue/cmd/cue.version=1.1.1",
+		"-ldflags", "-X github.com/iSerganov/gocue/cmd/cue.version=1.1.2",
 		repoRoot,
 	)
 	build.Dir = repoRoot

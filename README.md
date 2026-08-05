@@ -4,7 +4,7 @@
 [![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/iSerganov/gocue/badges/coverage.json)](https://github.com/iSerganov/gocue/actions/workflows/ci.yml)
 [![Go Version](https://img.shields.io/badge/Go-1.26+-blue.svg)](https://golang.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-1.1.1-blue.svg)](Makefile)
+[![Version](https://img.shields.io/badge/Version-1.1.2-blue.svg)](Makefile)
 
 **gocue** is a Go audio analysis tool for professional playout workflows. It detects cue-in, cue-out, and overlay points and measures EBU R128 loudness, then prints JSON on stdout for Liquidsoap’s `autocue:` protocol.
 
@@ -197,7 +197,7 @@ Use `--blankskip` for “hidden track” gaps. It is **off by default** (`0.0`) 
 
 ## Liquidsoap protocol
 
-**Requires [Liquidsoap 2.2.5+](https://github.com/savonet/liquidsoap/releases).**
+**Requires [Liquidsoap 2.3.0+](https://github.com/savonet/liquidsoap/releases).** Note that Ubuntu 24.04 packages 2.2.4, which is too old — install an official release build.
 
 Prefix a playlist or request with `autocue:`:
 
@@ -270,7 +270,7 @@ The script also exports `check_autocue_setup(~do_print=false)`, which re-applies
 ### Requirements and caveats
 
 - `gocue` reachable via `settings.gocue.path`; `ffmpeg` on `PATH` only if you enable `write_tags`.
-- Developed and tested against Liquidsoap 2.4.x; needs a version providing `autocue.register` (see [Liquidsoap protocol](#liquidsoap-protocol) above).
+- Liquidsoap 2.3.0+ (see [Liquidsoap protocol](#liquidsoap-protocol) above); developed and tested against 2.4.5.
 - `liq_cross_start_next` is handed to Liquidsoap through the autocue record rather than as metadata, so it does not appear in track metadata — Liquidsoap reconciles it into `liq_cross_end_duration` and `liq_cross_max_start_duration`. It *is* stored as a tag when `write_tags` is on.
 - `force_analysis` and `use_json_metadata` exist for configuration compatibility with `autocue.cue_file.liq` only. gocue has no `-f` or `-j`, so enabling either logs a warning and changes nothing.
 - `nice` runs the binary through `nice(1)` rather than passing a flag, because gocue’s `-n` means “pretty-print JSON”.

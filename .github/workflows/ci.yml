@@ -65,7 +65,10 @@ jobs:
 
   integration:
     name: integration (liquidsoap)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    env:
+      LIQUIDSOAP_VERSION: "2.4.5"
+      LIQUIDSOAP_DEB: liquidsoap_2.4.5-ubuntu-noble-ocaml5.4.0-2_amd64.deb
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -74,7 +77,10 @@ jobs:
       - name: Install ffmpeg and liquidsoap
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg liquidsoap
+          sudo apt-get install -y ffmpeg
+          curl -fsSL -O "https://github.com/savonet/liquidsoap/releases/download/v${LIQUIDSOAP_VERSION}/${LIQUIDSOAP_DEB}"
+          sudo apt-get install -y "./${LIQUIDSOAP_DEB}"
+          rm -f "${LIQUIDSOAP_DEB}"
           liquidsoap --version
       - name: Integration tests
         run: go test -tags=integration ./integration/ -v -count=1 -timeout 20m
