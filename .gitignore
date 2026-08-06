@@ -8,6 +8,9 @@
 *.so
 *.dylib
 /dist
+/integration/.bin/
+/integration/testdata/*.m3u
+/tmp/
 
 # Test binary, built with `go test -c`
 *.test

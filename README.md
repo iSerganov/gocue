@@ -4,11 +4,11 @@
 [![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/iSerganov/gocue/badges/coverage.json)](https://github.com/iSerganov/gocue/actions/workflows/ci.yml)
 [![Go Version](https://img.shields.io/badge/Go-1.26+-blue.svg)](https://golang.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-1.1.1-blue.svg)](Makefile)
+[![Version](https://img.shields.io/badge/Version-1.1.2-blue.svg)](Makefile)
 
 **gocue** is a Go audio analysis tool for professional playout workflows. It detects cue-in, cue-out, and overlay points and measures EBU R128 loudness, then prints JSON on stdout for Liquidsoap’s `autocue:` protocol.
 
-gocue is a stand-alone analyzer: it **reads** existing `liq_*` / ReplayGain tags when they are complete (to skip a full ffmpeg scan) and **does not write** tags back to files. Tag write-back, fades, and playlist wiring belong in a Liquidsoap `.liq` script. You can start from [autocue.gocue.liq](https://github.com/iSerganov/autocue/blob/master/autocue.gocue.liq) (adapted from [Moonbase59’s autocue](https://github.com/Moonbase59/autocue/blob/master/autocue.cue_file.liq)). See the [Liquidsoap autocue docs](https://www.liquidsoap.info/doc-dev/settings.html#all-available-autocue-implementations) for details.
+gocue is a stand-alone analyzer: it **reads** existing `liq_*` / ReplayGain tags when they are complete (to skip a full ffmpeg scan) and **does not write** tags back to files. Tag write-back, fades, and playlist wiring belong in a Liquidsoap `.liq` script. This repository ships a ready-to-use one — [`integration/scripts/gocue.liq`](integration/scripts/gocue.liq), documented under [Liquidsoap script (`gocue.liq`)](#liquidsoap-script-gocueliq) — adapted from [Moonbase59’s autocue](https://github.com/Moonbase59/autocue/blob/master/autocue.cue_file.liq); it is also published standalone as [autocue.gocue.liq](https://github.com/iSerganov/autocue/blob/master/autocue.gocue.liq). See the [Liquidsoap autocue docs](https://www.liquidsoap.info/doc-dev/settings.html#all-available-autocue-implementations) for details.
 
 For algorithm background, see [Moonbase59’s autocue presentation](https://moonbase59.github.io/autocue/presentation/autocue.html).
 
@@ -182,7 +182,7 @@ How that result is chosen:
 Fade length after overlay is configured in Liquidsoap (not by gocue), e.g.:
 
 ```ruby
-settings.autocue.gocue.fade_out := 2.5  # seconds
+settings.gocue.fade_out := 2.5  # seconds
 ```
 
 ### Blank (silence) detection
@@ -197,7 +197,7 @@ Use `--blankskip` for “hidden track” gaps. It is **off by default** (`0.0`) 
 
 ## Liquidsoap protocol
 
-**Requires [Liquidsoap 2.2.5+](https://github.com/savonet/liquidsoap/releases).**
+**Requires [Liquidsoap 2.3.0+](https://github.com/savonet/liquidsoap/releases).** Note that Ubuntu 24.04 packages 2.2.4, which is too old — install an official release build.
 
 Prefix a playlist or request with `autocue:`:
 
@@ -205,29 +205,111 @@ Prefix a playlist or request with `autocue:`:
 radio = playlist(prefix="autocue:", "/path/to/playlist.m3u")
 ```
 
-Or use `enable_autocue_metadata()` for all files—use one approach, not both. For video streams, exclude media with `liq_gocue=false` (full video analysis is expensive).
+Or use `enable_autocue_metadata()` for all files—use one approach, not both. For video streams, exclude media with `liq_cue_file=false` (full video analysis is expensive).
 
-Typical settings (defaults shown; exact keys depend on your `.liq` script):
+Typical settings (defaults shown, as declared by the bundled [`gocue.liq`](integration/scripts/gocue.liq)):
 
 ```ruby
-settings.autocue.gocue.path := "gocue"
-settings.autocue.gocue.fade_in := 0.1  # seconds
-settings.autocue.gocue.fade_out := 2.5  # seconds
-settings.autocue.gocue.timeout := 60.0  # seconds
-settings.autocue.gocue.target := -18.0  # LUFS
-settings.autocue.gocue.silence := -42.0  # LU below track loudness
-settings.autocue.gocue.overlay := -8.0  # LU below track loudness
-settings.autocue.gocue.longtail := 15.0  # seconds
-settings.autocue.gocue.overlay_longtail := -12.0  # extra LU
-settings.autocue.gocue.sustained_loudness_drop := 40.0
-settings.autocue.gocue.noclip := false
-settings.autocue.gocue.blankskip := 0.0
-settings.autocue.gocue.unify_loudness_correction := true
-settings.autocue.gocue.write_tags := false       # Liquidsoap writes liq_* tags (not gocue itself)
-settings.autocue.gocue.write_replaygain := false
-settings.autocue.gocue.force_analysis := false
-settings.autocue.gocue.nice := false
+settings.gocue.path := "gocue"
+settings.gocue.fade_in := 0.1  # seconds
+settings.gocue.fade_out := 2.5  # seconds
+settings.gocue.timeout := 60.0  # seconds
+settings.gocue.target := -18.0  # LUFS
+settings.gocue.silence := -42.0  # LU below track loudness
+settings.gocue.overlay := -8.0  # LU below track loudness
+settings.gocue.longtail := 15.0  # seconds
+settings.gocue.overlay_longtail := -12.0  # extra LU
+settings.gocue.sustained_loudness_drop := 40.0
+settings.gocue.noclip := false
+settings.gocue.blankskip := 0.0
+settings.gocue.unify_loudness_correction := true
+settings.gocue.write_tags := false       # the .liq script writes liq_* tags (not gocue itself)
+settings.gocue.write_replaygain := false
+settings.gocue.ignored_overrides := ["duration"]
+settings.gocue.max_initial_duration_to_skip := 600.0  # seconds
+settings.gocue.nice := false
+settings.gocue.force_analysis := false      # no gocue equivalent; logs a warning if set
+settings.gocue.use_json_metadata := false   # no gocue equivalent; logs a warning if set
 ```
+
+## Liquidsoap script (`gocue.liq`)
+
+[`integration/scripts/gocue.liq`](integration/scripts/gocue.liq) is a complete, self-contained Liquidsoap **autocue provider** that shells out to the gocue binary. Despite living under `integration/`, it is not test scaffolding: the integration suite exercises the same file you are meant to deploy, so you can drop it straight into a production configuration as a custom autocue implementation.
+
+It is a port of [Moonbase59’s `autocue.cue_file.liq`](https://github.com/Moonbase59/autocue/blob/master/autocue.cue_file.liq) with the settings namespace moved to `settings.gocue.*` and the CLI call adapted to gocue’s flags.
+
+### What including it does
+
+`%include`-ing the file declares the `settings.gocue.*` tree, defines the provider, and registers it:
+
+```ruby
+settings.autocue.metadata.priority := 10   # annotations (priority 5) can still override
+settings.autocue.preferred := "gocue"
+settings.autocue.amplify_behavior := "keep"
+settings.fade.out.duration := settings.gocue.fade_out()   # avoids dead air on reconcile
+autocue.register(name="gocue", gocue)
+```
+
+That means `autocue:` prefixes and `enable_autocue_metadata()` route through gocue with no further wiring. Tracks resolved by it report `liq_autocue="gocue"`.
+
+The script also exports `check_autocue_setup(~do_print=false)`, which re-applies those settings and logs the active script version and binary path. Calling it is optional; it always returns `true` (there is no version handshake with the binary).
+
+### What it does per track
+
+1. **Merges metadata** — request metadata (`annotate:`) takes precedence over file tags.
+2. **Honours `liq_cue_file`** — `false` skips analysis entirely and keeps existing metadata; `true` makes gocue’s results win over existing metadata; absent (the default) lets existing metadata and annotations override gocue, apart from the keys in `settings.gocue.ignored_overrides`.
+3. **Resolves blank skipping** — from `settings.gocue.blankskip`, forced off for `jingle_mode` tracks and for SAM Broadcaster `songtype != "S"`, and ultimately overridable per track via `liq_blankskip` (accepts the pre-3.0.0 boolean form).
+4. **Runs the binary** — `-t -s -o -l -x -d` from the settings, plus `-k` for `noclip`, `-b` for blankskip, and `-e` carrying `settings.gocue.timeout`; parses the one-line JSON from stdout.
+5. **Recomputes gain** — derives `liq_amplify`, `liq_amplify_adjustment`, and `liq_reference_loudness` from `liq_loudness` and `liq_true_peak_db` against your target, applying clipping prevention when `noclip` is set.
+6. **Unifies ReplayGain** — with `unify_loudness_correction`, brings `replaygain_track_gain` and `liq_amplify` into line (target-aware, and handling the old RG1/mp3gain `"89 dB"` reference), so a script can amplify on either value without loudness jumps.
+7. **Validates the crossfade window** — corrects `liq_cross_start_next` when only a cue-out was annotated, shrinks `liq_cue_out` when the requested fade-out is shorter than the overlay, clamps an over-long `liq_fade_in`, and recomputes `liq_cue_duration`.
+8. **Playlist sync (optional)** — an `enforce_start_time` annotation shifts `liq_cue_in` to catch up to a wall-clock schedule, bounded by `settings.gocue.max_initial_duration_to_skip`.
+9. **Writes tags (optional)** — with `write_tags`, remuxes the file via ffmpeg to store the `liq_*` (and, with `write_replaygain`, `replaygain_*`) tags, so later runs hit gocue’s read-only tag cache instead of a full scan. gocue itself never mutates files.
+10. **Filters output** — emits only autocue-relevant keys, so decoder and annotation metadata are left intact.
+
+### Requirements and caveats
+
+- `gocue` reachable via `settings.gocue.path`; `ffmpeg` on `PATH` only if you enable `write_tags`.
+- Liquidsoap 2.3.0+ (see [Liquidsoap protocol](#liquidsoap-protocol) above); developed and tested against 2.4.5.
+- `liq_cross_start_next` is handed to Liquidsoap through the autocue record rather than as metadata, so it does not appear in track metadata — Liquidsoap reconciles it into `liq_cross_end_duration` and `liq_cross_max_start_duration`. It *is* stored as a tag when `write_tags` is on.
+- `force_analysis` and `use_json_metadata` exist for configuration compatibility with `autocue.cue_file.liq` only. gocue has no `-f` or `-j`, so enabling either logs a warning and changes nothing.
+- `nice` runs the binary through `nice(1)` rather than passing a flag, because gocue’s `-n` means “pretty-print JSON”.
+
+### Minimum working example
+
+Copy `gocue.liq` next to your configuration (`%include` resolves relative to the including script; an absolute path such as `%include "/etc/liquidsoap/gocue.liq"` also works):
+
+```ruby
+# radio.liq
+
+%include "gocue.liq"
+
+settings.gocue.path := "/usr/local/bin/gocue"
+settings.gocue.target := -18.0   # LUFS
+settings.gocue.fade_out := 2.5   # seconds
+
+# Optional: log the active script version and binary path at startup.
+ignore(check_autocue_setup(do_print=true))
+
+# The "autocue:" prefix sends every request through the registered provider.
+radio = playlist(prefix="autocue:", "/var/music/playlist.m3u")
+
+# Apply the loudness correction gocue calculated, then crossfade using its cue points.
+radio = amplify(1.0, override="liq_amplify", radio)
+radio = crossfade(radio)
+
+output.icecast(
+  %mp3,
+  host="localhost",
+  port=8000,
+  password="hackme",
+  mount="/radio",
+  fallible=true,
+  radio
+)
+```
+
+For a fuller configuration — harbor endpoints, metadata reporting, and a silence fallback — see [`integration/scripts/station.liq`](integration/scripts/station.liq).
 
 ## Advanced configuration
 
@@ -292,9 +374,13 @@ done
 go test ./...
 go test -race -count=1 ./...
 go test ./pkg/cue -v
+
+# Liquidsoap end-to-end (needs liquidsoap + ffmpeg on PATH)
+go test -tags=integration ./integration/ -count=1 -timeout 10m
+# or: make test-integration
 ```
 
-Requires `ffmpeg` / `ffprobe` on `PATH` for scan/probe tests.
+Requires `ffmpeg` / `ffprobe` on `PATH` for scan/probe tests. Integration tests also need `liquidsoap` and use fixtures under `integration/testdata/` with scripts in `integration/scripts/`.
 
 ## Project structure
 
@@ -330,11 +416,5 @@ Apache 2.0 — see [LICENSE](LICENSE).
 
 Inspired by [Moonbase59/autocue](https://github.com/Moonbase59/autocue) (Python). That project is no longer maintained and drifted from current Liquidsoap; gocue is a Go port with a focus on performance and a cleaner library/CLI split.
 
-- **FFmpeg** — analysis pipeline
-- **Liquidsoap** — autocue protocol
-- **EBU** — R128 loudness standard
-
-## Support
-
-- Open a GitHub issue
-- `./gocue --help`
+- **FFmpeg** — awesome AV processing framework
+- **Liquidsoap** — powerful audio streaming language/toolkit to build radio automation systems
