@@ -379,50 +379,49 @@ func takePureValue(key, val string) (string, error) {
 	return res[0], nil
 }
 
+// numericTag returns the value of a tag the cached path relies on, or
+// ErrRequireAnalysis when the tag is absent or does not hold a number.
+func numericTag(tags map[string]string, key string) (float64, error) {
+	raw, ok := tags[key]
+	if !ok {
+		return 0, ErrRequireAnalysis{inner: fmt.Errorf("tag %s is missing", key)}
+	}
+	val, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, ErrRequireAnalysis{inner: fmt.Errorf("tag %s is not numeric: %q", key, raw)}
+	}
+	return val, nil
+}
+
 // doPreAnalysis tries to avoid re-analysis when we have enough tag data but a
 // different loudness target; it returns ErrRequireAnalysis if a full scan is needed.
 func (c *Calculator) doPreAnalysis(tags map[string]string) error {
 	for _, bt := range baseTags {
-		if _, ok := tags[bt]; !ok {
-			return ErrRequireAnalysis{inner: fmt.Errorf("tag '%s' is missing", bt)}
+		if _, err := numericTag(tags, bt); err != nil {
+			return err
 		}
 	}
 
-	liqAmplify, liqAmplifyOK := tags["liq_amplify"]
-	if !liqAmplifyOK {
-		return ErrRequireAnalysis{inner: fmt.Errorf("tag liq_amplify is missing")}
+	if _, err := numericTag(tags, "liq_amplify"); err != nil {
+		return err
 	}
-	refLoudness, refLoudnessOK := tags["liq_reference_loudness"]
-	if !refLoudnessOK {
-		return ErrRequireAnalysis{inner: fmt.Errorf("tag liq_reference_loudness is missing")}
+	if _, err := numericTag(tags, "liq_reference_loudness"); err != nil {
+		return err
 	}
-	// liq_amplify is recomputed from liq_loudness by calcAmplify below, so we
-	// only record the requested reference loudness here, under the same guard
-	// (both inputs must be valid numbers).
-	if _, err := strconv.ParseFloat(liqAmplify, 64); err == nil {
-		if _, err := strconv.ParseFloat(refLoudness, 64); err == nil {
-			tags["liq_reference_loudness"] = fmt.Sprintf("%.3f", c.targetLoudness)
-		}
-	}
+	// liq_amplify is recomputed from liq_loudness by calcAmplify below, so only
+	// the requested reference loudness is recorded here.
+	tags["liq_reference_loudness"] = fmt.Sprintf("%.3f", c.targetLoudness)
 
-	if _, ok := tags["liq_true_peak"]; !ok {
-		return ErrRequireAnalysis{inner: fmt.Errorf("tag liq_true_peak is missing")}
+	if _, err := numericTag(tags, "liq_true_peak"); err != nil {
+		return err
 	}
-	liqTruePeakDb, liqTruePeakDbOK := tags["liq_true_peak_db"]
-	if !liqTruePeakDbOK {
-		return ErrRequireAnalysis{inner: fmt.Errorf("tag liq_true_peak_db is missing")}
-	}
-	liqLoudness, liqLoudnessOK := tags["liq_loudness"]
-	if !liqLoudnessOK {
-		return ErrRequireAnalysis{inner: fmt.Errorf("tag liq_loudness is missing")}
-	}
-	liqTruePeakDbVal, err := strconv.ParseFloat(liqTruePeakDb, 64)
+	liqTruePeakDbVal, err := numericTag(tags, "liq_true_peak_db")
 	if err != nil {
-		return ErrRequireAnalysis{inner: fmt.Errorf("cannot parse liq_true_peak_db: %w", err)}
+		return err
 	}
-	liqLoudnessVal, err := strconv.ParseFloat(liqLoudness, 64)
+	liqLoudnessVal, err := numericTag(tags, "liq_loudness")
 	if err != nil {
-		return ErrRequireAnalysis{inner: fmt.Errorf("cannot parse liq_loudness: %w", err)}
+		return err
 	}
 	liqAmplifyVal, liqAmplifyAdjVal := c.calcAmplify(liqLoudnessVal, liqTruePeakDbVal)
 	tags["liq_amplify"] = fmt.Sprintf("%.3f", liqAmplifyVal)
@@ -437,8 +436,8 @@ func (c *Calculator) doPreAnalysis(tags map[string]string) error {
 
 	// liq_loudness_range is only informational but we want to show correct values;
 	// we can't blindly take replaygain_track_range—it might be in a different unit
-	if _, ok := tags["liq_loudness_range"]; !ok {
-		return ErrRequireAnalysis{inner: fmt.Errorf("tag liq_loudness_range is missing")}
+	if _, err := numericTag(tags, "liq_loudness_range"); err != nil {
+		return err
 	}
 	return nil
 }

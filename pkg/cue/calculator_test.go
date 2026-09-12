@@ -352,29 +352,30 @@ func (s *CalculatorSuite) TestCalcAmplify() {
 	})
 }
 
+// fullCacheTags returns a tag set complete enough for the cached fast path.
+func fullCacheTags() map[string]string {
+	return map[string]string{
+		"duration":               "100",
+		"liq_cue_in":             "0.0",
+		"liq_cue_out":            "99.0",
+		"liq_cross_start_next":   "98.0",
+		"replaygain_track_gain":  "-5.0",
+		"liq_amplify":            "-5.0",
+		"liq_reference_loudness": "-16.0",
+		"liq_true_peak":          "0.9",
+		"liq_true_peak_db":       "-1.0",
+		"liq_loudness":           "-14.0",
+		"liq_loudness_range":     "7.0",
+	}
+}
+
 // TestDoPreAnalysis covers the cached fast-path decision (§5): a complete tag
 // set skips re-analysis and recomputes liq_amplify, while a missing tag returns
 // ErrRequireAnalysis.
 func (s *CalculatorSuite) TestDoPreAnalysis() {
-	fullTags := func() map[string]string {
-		return map[string]string{
-			"duration":               "100",
-			"liq_cue_in":             "0.0",
-			"liq_cue_out":            "99.0",
-			"liq_cross_start_next":   "98.0",
-			"replaygain_track_gain":  "-5.0",
-			"liq_amplify":            "-5.0",
-			"liq_reference_loudness": "-16.0",
-			"liq_true_peak":          "0.9",
-			"liq_true_peak_db":       "-1.0",
-			"liq_loudness":           "-14.0",
-			"liq_loudness_range":     "7.0",
-		}
-	}
-
 	s.Run("complete tags skip analysis and recompute amplify", func() {
 		c := NewCalculator(nil) // target -18, noClip false
-		tags := fullTags()
+		tags := fullCacheTags()
 		err := c.doPreAnalysis(tags)
 		s.NoError(err)
 		// liq_amplify = target - loudness = -18 - (-14) = -4
@@ -394,7 +395,7 @@ func (s *CalculatorSuite) TestDoPreAnalysis() {
 
 	s.Run("changed blankskip requires re-analysis", func() {
 		c := NewCalculator(&CalculatorOptions{BlankSkip: 3.0})
-		tags := fullTags()
+		tags := fullCacheTags()
 		tags["liq_blankskip"] = "1.0" // differs from requested 3.0
 		err := c.doPreAnalysis(tags)
 		s.Error(err)
@@ -404,7 +405,7 @@ func (s *CalculatorSuite) TestDoPreAnalysis() {
 
 	s.Run("missing blankskip with requested blankskip requires re-analysis", func() {
 		c := NewCalculator(&CalculatorOptions{BlankSkip: 2.5})
-		tags := fullTags()
+		tags := fullCacheTags()
 		delete(tags, "liq_blankskip")
 		err := c.doPreAnalysis(tags)
 		s.Error(err)
@@ -415,11 +416,46 @@ func (s *CalculatorSuite) TestDoPreAnalysis() {
 
 	s.Run("missing blankskip with zero blankskip still allows cache", func() {
 		c := NewCalculator(nil) // blankSkip defaults to 0
-		tags := fullTags()
+		tags := fullCacheTags()
 		delete(tags, "liq_blankskip")
 		err := c.doPreAnalysis(tags)
 		s.NoError(err)
 	})
+}
+
+// TestDoPreAnalysisRejectsNonNumericTags pins the corrupt-tag path: every tag
+// the cached result is built from must parse as a number, so a damaged value
+// triggers a re-analysis instead of silently reaching the caller as zero.
+func (s *CalculatorSuite) TestDoPreAnalysisRejectsNonNumericTags() {
+	tests := []struct {
+		name string
+		tag  string
+	}{
+		{name: "corrupt duration forces re-analysis", tag: "duration"},
+		{name: "corrupt cue-in forces re-analysis", tag: "liq_cue_in"},
+		{name: "corrupt cue-out forces re-analysis", tag: "liq_cue_out"},
+		{name: "corrupt cross-start-next forces re-analysis", tag: "liq_cross_start_next"},
+		{name: "corrupt replaygain track gain forces re-analysis", tag: "replaygain_track_gain"},
+		{name: "corrupt amplify forces re-analysis", tag: "liq_amplify"},
+		{name: "corrupt reference loudness forces re-analysis", tag: "liq_reference_loudness"},
+		{name: "corrupt true peak forces re-analysis", tag: "liq_true_peak"},
+		{name: "corrupt true peak dB forces re-analysis", tag: "liq_true_peak_db"},
+		{name: "corrupt loudness forces re-analysis", tag: "liq_loudness"},
+		{name: "corrupt loudness range forces re-analysis", tag: "liq_loudness_range"},
+	}
+
+	for _, tc := range tests {
+		s.Run(tc.name, func() {
+			tags := fullCacheTags()
+			tags[tc.tag] = "bogus"
+
+			err := NewCalculator(nil).doPreAnalysis(tags)
+
+			var reqErr ErrRequireAnalysis
+			s.Require().ErrorAs(err, &reqErr)
+			s.Contains(err.Error(), tc.tag)
+		})
+	}
 }
 
 // TestCalcMissingFile covers the error path (§5): a non-existent input must
