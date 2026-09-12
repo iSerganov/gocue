@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -88,6 +89,7 @@ var (
 		"replaygain_track_range":        {},
 		"replaygain_reference_loudness": {},
 		"liq_true_peak_db":              {},
+		"liq_true_peak":                 {},
 	}
 )
 
@@ -191,10 +193,14 @@ func (c *Calculator) Calc(pathToFile string) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Derived values (Opus R128 gain, legacy ReplayGain reference) must exist
+	// before the cache decision, or files carrying only those tags can never
+	// satisfy it. Upstream derives them in the same order.
+	c.adjustLoudness(tags)
+
 	err = c.doPreAnalysis(tags)
 	if err == nil {
 		c.populate(tags)
-		c.adjustLoudness(tags)
 		return parseTags(tags), nil
 	}
 	var needScan ErrRequireAnalysis
@@ -302,9 +308,13 @@ func (c *Calculator) tagsFromProbe(probed probePayload) map[string]string {
 }
 
 // mergeVerifiedTags copies keys listed in verifyTags into dst, cleaning
-// unit-suffixed values. Invalid values are skipped with a diagnostic line.
+// unit-suffixed values. Keys are lower-cased first, because ffprobe reports
+// them as the container spells them: ID3 TXXX frames and the Opus
+// R128_TRACK_GAIN tag commonly arrive upper-case. Invalid values are skipped
+// with a diagnostic line.
 func (c *Calculator) mergeVerifiedTags(dst map[string]string, src map[string]string) {
 	for key, val := range src {
+		key = strings.ToLower(key)
 		if _, keep := verifyTags[key]; !keep {
 			continue
 		}

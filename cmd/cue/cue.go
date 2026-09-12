@@ -11,7 +11,7 @@ import (
 	"github.com/iSerganov/gocue/pkg/cue"
 )
 
-var version = "1.0.0"
+var version = "dev"
 
 // options holds the flag values for a single command invocation. Keeping them
 // on a per-command struct (instead of package-level globals) makes the command
@@ -136,7 +136,9 @@ func (o *options) run(cmd *cobra.Command, file string) error {
 		return fmt.Errorf("error while marshalling the result: %w", err)
 	}
 
-	fmt.Println(string(jsonData))
+	if _, err := fmt.Fprintln(cmd.OutOrStdout(), string(jsonData)); err != nil {
+		return fmt.Errorf("error while writing the result: %w", err)
+	}
 	return nil
 }
 
