@@ -1,0 +1,67 @@
+# Test station: gocue built from this repository, driving Liquidsoap, streaming
+# Ogg Vorbis to Icecast.
+#
+# Run it from the repository root with `make example-up`, or from here with
+# `docker compose up --build`. Settings come from example/.env, which is not
+# tracked; copy .env.example to .env first.
+
+services:
+  icecast:
+    image: libretime/icecast:2.5.0
+    container_name: gocue-icecast
+    restart: unless-stopped
+    ports:
+      - "${ICECAST_PUBLIC_PORT:-8000}:8000"
+    environment:
+      ICECAST_SOURCE_PASSWORD: ${ICECAST_SOURCE_PASSWORD:-hackme}
+      ICECAST_RELAY_PASSWORD: ${ICECAST_RELAY_PASSWORD:-hackme}
+      ICECAST_ADMIN_PASSWORD: ${ICECAST_ADMIN_PASSWORD:-hackme}
+      ICECAST_ADMIN_USERNAME: ${ICECAST_ADMIN_USERNAME:-admin}
+      ICECAST_ADMIN_EMAIL: ${ICECAST_ADMIN_EMAIL:-admin@example.invalid}
+      ICECAST_HOSTNAME: ${ICECAST_HOSTNAME:-localhost}
+      ICECAST_MAX_CLIENTS: "50"
+      ICECAST_MAX_SOURCES: "4"
+
+  station:
+    build:
+      # The context is the repository root so the image can build the Go
+      # sources and pick up integration/scripts/gocue.liq.
+      context: ..
+      dockerfile: example/Dockerfile
+      args:
+        VERSION: ${GOCUE_VERSION:-dev}
+    container_name: gocue-station
+    restart: unless-stopped
+    depends_on:
+      - icecast
+    ports:
+      - "${STATION_HARBOR_PORT:-8080}:8080"
+    volumes:
+      # Your audio, read-only. MUSIC_DIR lives in .env and is never committed.
+      - ${MUSIC_DIR:?set MUSIC_DIR in example/.env}:/music:ro
+      # The generated playlist, also never committed.
+      - ./media:/media:ro
+    environment:
+      STATION_PLAYLIST: /media/playlist.pls
+      STATION_HARBOR_PORT: "8080"
+      STATION_NAME: ${STATION_NAME:-gocue example radio}
+      STATION_DESCRIPTION: ${STATION_DESCRIPTION:-Autocue points and EBU R128 loudness by gocue}
+      STATION_GENRE: ${STATION_GENRE:-Oldies}
+      STATION_URL: ${STATION_URL:-https://github.com/iSerganov/gocue}
+      ICECAST_HOST: icecast
+      ICECAST_PORT: "8000"
+      ICECAST_MOUNT: ${ICECAST_MOUNT:-/radio.ogg}
+      ICECAST_SOURCE_PASSWORD: ${ICECAST_SOURCE_PASSWORD:-hackme}
+      GOCUE_BIN: /usr/local/bin/gocue
+      GOCUE_TARGET: ${GOCUE_TARGET:--16.0}
+      GOCUE_SILENCE: ${GOCUE_SILENCE:--42.0}
+      GOCUE_OVERLAY: ${GOCUE_OVERLAY:--8.0}
+      GOCUE_LONGTAIL: ${GOCUE_LONGTAIL:-15.0}
+      GOCUE_EXTRA: ${GOCUE_EXTRA:--12.0}
+      GOCUE_DROP: ${GOCUE_DROP:-40.0}
+      GOCUE_BLANKSKIP: ${GOCUE_BLANKSKIP:-0.0}
+      GOCUE_FADE_IN: ${GOCUE_FADE_IN:-2.0}
+      GOCUE_FADE_OUT: ${GOCUE_FADE_OUT:-4.0}
+      GOCUE_NOCLIP: ${GOCUE_NOCLIP:-true}
+      GOCUE_TIMEOUT: ${GOCUE_TIMEOUT:-120.0}
+      STATION_MAX_CROSS: ${STATION_MAX_CROSS:-4.0}
