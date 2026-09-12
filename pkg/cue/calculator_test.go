@@ -4,7 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"maps"
+	"math"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -250,8 +254,7 @@ func (s *CalculatorSuite) TestParseTagsReferenceLoudness() {
 	s.InDelta(-1.2, res.TruePeakDb, 1e-9)
 	// the presentation form (unit suffix, 3-decimal precision) is applied at
 	// the serialization boundary
-	ann, err := res.Annotations()
-	s.Require().NoError(err)
+	ann := res.Annotations()
 	s.Equal("-18.000 LUFS", ann["liq_reference_loudness"])
 	s.Equal("-1.200 dBFS", ann["liq_true_peak_db"])
 }
@@ -458,6 +461,180 @@ func (s *CalculatorSuite) TestDoPreAnalysisRejectsNonNumericTags() {
 	}
 }
 
+// taggedCopy remuxes src into a temporary file carrying the given tags.
+func (s *CalculatorSuite) taggedCopy(src string, tags map[string]string) string {
+	s.T().Helper()
+	dst := filepath.Join(s.T().TempDir(), "tagged"+filepath.Ext(src))
+	args := []string{"-v", "error", "-y", "-i", src, "-c", "copy"}
+	for k, v := range tags {
+		args = append(args, "-metadata", k+"="+v)
+	}
+	out, err := exec.Command("ffmpeg", append(args, dst)...).CombinedOutput()
+	s.Require().NoError(err, string(out))
+	return dst
+}
+
+func (s *CalculatorSuite) TestMergeVerifiedTagsLowercasesKeys() {
+	tests := []struct {
+		name    string
+		src     map[string]string
+		wantKey string
+		wantVal string
+	}{
+		{
+			name:    "upper-case ID3 cue tag is matched",
+			src:     map[string]string{"LIQ_CUE_IN": "1.500"},
+			wantKey: "liq_cue_in",
+			wantVal: "1.500",
+		},
+		{
+			name:    "upper-case opus r128 gain is matched",
+			src:     map[string]string{"R128_TRACK_GAIN": "1024"},
+			wantKey: "r128_track_gain",
+			wantVal: "1024",
+		},
+		{
+			name:    "mixed-case replaygain tag is matched and cleaned",
+			src:     map[string]string{"ReplayGain_Track_Gain": "-5.000 dB"},
+			wantKey: "replaygain_track_gain",
+			wantVal: "-5.000",
+		},
+	}
+
+	for _, tc := range tests {
+		s.Run(tc.name, func() {
+			dst := map[string]string{}
+			NewCalculator(nil).mergeVerifiedTags(dst, tc.src)
+			s.Equal(tc.wantVal, dst[tc.wantKey])
+		})
+	}
+}
+
+// TestCalcReusesTagsWithDerivedTrackGain covers files whose only loudness
+// correction is a tag gocue has to derive replaygain_track_gain from. Those
+// derivations must happen before the cached-path decision, or the file is
+// re-analysed on every run.
+func (s *CalculatorSuite) TestCalcReusesTagsWithDerivedTrackGain() {
+	const fixture = "test_data/sample.ogg"
+	if _, err := os.Stat(fixture); err != nil {
+		s.T().Skipf("fixture %s not available: %v", fixture, err)
+	}
+
+	cached := map[string]string{
+		"liq_cue_in":             "1.000",
+		"liq_cue_out":            "99.000",
+		"liq_cross_start_next":   "98.000",
+		"liq_loudness":           "-14.000 LUFS",
+		"liq_loudness_range":     "7.000 LU",
+		"liq_reference_loudness": "-18.000 LUFS",
+		"liq_true_peak":          "0.900",
+		"liq_true_peak_db":       "-1.000 dBFS",
+	}
+
+	tests := []struct {
+		name string
+		gain map[string]string
+	}{
+		{
+			name: "upper-case opus r128 gain alone satisfies the cached path",
+			gain: map[string]string{"R128_TRACK_GAIN": "1024"},
+		},
+		{
+			name: "upper-case replaygain track gain alone satisfies the cached path",
+			gain: map[string]string{"REPLAYGAIN_TRACK_GAIN": "-5.000 dB"},
+		},
+		{
+			name: "lower-case replaygain track gain alone satisfies the cached path",
+			gain: map[string]string{"replaygain_track_gain": "-5.000 dB"},
+		},
+	}
+
+	for _, tc := range tests {
+		s.Run(tc.name, func() {
+			tags := maps.Clone(cached)
+			maps.Copy(tags, tc.gain)
+
+			var diag bytes.Buffer
+			calc := NewCalculator(&CalculatorOptions{
+				TargetLoudness:   defaultTargetLUFS,
+				ExecutionTimeout: 30 * time.Second,
+				Diagnostics:      &diag,
+			})
+			res, err := calc.Calc(s.taggedCopy(fixture, tags))
+
+			s.Require().NoError(err)
+			s.Empty(diag.String(), "cached tags must not trigger a scan")
+			s.InDelta(99.0, res.CueOut, 1e-9)
+		})
+	}
+}
+
+// TestParseFFmpegOutputMomentaryLoudness pins how a frame with no usable
+// momentary loudness is recorded. Upstream turns ffmpeg's "nan" into negative
+// infinity so the frame compares as silence; a NaN would fail every comparison
+// instead, hiding blanks and sustained endings.
+func (s *CalculatorSuite) TestParseFFmpegOutputMomentaryLoudness() {
+	tests := []struct {
+		name  string
+		input string
+		want  float64
+	}{
+		{
+			name:  "numeric momentary loudness is kept",
+			input: "frame:0 pts_time:0.0\nlavfi.r128.M=-23.500\n",
+			want:  -23.5,
+		},
+		{
+			name:  "nan momentary loudness counts as silence",
+			input: "frame:0 pts_time:0.0\nlavfi.r128.M=nan\n",
+			want:  math.Inf(-1),
+		},
+		{
+			name:  "negative infinity is kept",
+			input: "frame:0 pts_time:0.0\nlavfi.r128.M=-inf\n",
+			want:  math.Inf(-1),
+		},
+		{
+			name:  "frame without a momentary loudness line counts as silence",
+			input: "frame:0 pts_time:0.0\nlavfi.r128.I=-23.000\n",
+			want:  math.Inf(-1),
+		},
+	}
+
+	for _, tc := range tests {
+		s.Run(tc.name, func() {
+			frames, _, _, err := NewCalculator(nil).parseFFmpegOutput(strings.NewReader(tc.input))
+
+			s.Require().NoError(err)
+			s.Require().Len(frames, 1)
+			s.Equal(tc.want, frames[0].Loudness)
+		})
+	}
+}
+
+// TestScanReportsFFmpegStderr checks that a failing ffmpeg is quoted in the
+// error, so a scan failure says more than its exit status.
+func (s *CalculatorSuite) TestScanReportsFFmpegStderr() {
+	tests := []struct {
+		name string
+		file string
+	}{
+		{name: "unreadable input reports why ffmpeg refused it", file: "calculator.go"},
+		{name: "missing input reports why ffmpeg refused it", file: "test_data/does_not_exist.wav"},
+	}
+
+	for _, tc := range tests {
+		s.Run(tc.name, func() {
+			calc := NewCalculator(&CalculatorOptions{ExecutionTimeout: 10 * time.Second})
+
+			_, err := calc.scan(tc.file)
+
+			s.Require().Error(err)
+			s.Regexp(`exit status \d+: .+`, err.Error())
+		})
+	}
+}
+
 // TestCalcMissingFile covers the error path (§5): a non-existent input must
 // surface an error rather than panicking. Works whether or not ffprobe is
 // installed (missing binary and missing file both yield an error).
@@ -504,19 +681,20 @@ func BenchmarkScan(b *testing.B) {
 }
 
 func BenchmarkParseFFmpegOutput(b *testing.B) {
-	// Create sample ffmpeg output data
-	sampleData := `frame: pts_time:0.0 lavfi.r128.M=-23.5 lavfi.r128.I=-23.5
-frame: pts_time:0.1 lavfi.r128.M=-22.8 lavfi.r128.I=-23.2
-frame: pts_time:0.2 lavfi.r128.M=-21.9 lavfi.r128.I=-23.0
-frame: pts_time:0.3 lavfi.r128.M=-20.5 lavfi.r128.I=-22.5
-frame: pts_time:0.4 lavfi.r128.M=-19.8 lavfi.r128.I=-22.0
-frame: pts_time:0.5 lavfi.r128.M=-18.9 lavfi.r128.I=-21.5
-frame: pts_time:0.6 lavfi.r128.M=-17.2 lavfi.r128.I=-20.8
-frame: pts_time:0.7 lavfi.r128.M=-16.5 lavfi.r128.I=-20.0
-frame: pts_time:0.8 lavfi.r128.M=-15.8 lavfi.r128.I=-19.2
-frame: pts_time:0.9 lavfi.r128.M=-14.9 lavfi.r128.I=-18.5
-frame: pts_time:1.0 lavfi.r128.M=-13.2 lavfi.r128.I=-17.8
-lavfi.r128.true_peaks_ch0=0.123 lavfi.r128.LRA=5.2`
+	var sb strings.Builder
+	for i := 0; i < 600; i++ {
+		fmt.Fprintf(&sb, `frame:%d    pts:%d       pts_time:%.1f
+lavfi.r128.M=%.3f
+lavfi.r128.S=-22.800
+lavfi.r128.I=-23.200
+lavfi.r128.LRA=5.200
+lavfi.r128.LRA.low=-25.100
+lavfi.r128.LRA.high=-19.900
+lavfi.r128.true_peaks_ch0=0.123
+lavfi.r128.true_peaks_ch1=0.131
+`, i, i*4800, float64(i)/10, -23.5+float64(i%40)/4)
+	}
+	sampleData := sb.String()
 
 	calculator := &Calculator{}
 

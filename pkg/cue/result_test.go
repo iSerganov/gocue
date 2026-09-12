@@ -33,8 +33,7 @@ func (s *ResultSuite) TestAnnotations() {
 		BlankSkip:         0.0,
 	}
 
-	a, err := result.Annotations()
-	s.NoError(err)
+	a := result.Annotations()
 	s.Equal(map[string]string{
 		"duration":               "101.100",
 		"liq_amplify":            "-25.500 dB",

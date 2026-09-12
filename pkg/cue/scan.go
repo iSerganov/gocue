@@ -17,6 +17,8 @@ const (
 	// every 100ms, so 4096 covers ~6.8 minutes without a reallocation; longer
 	// tracks just grow normally. At 16 bytes/frame this is ~64KB up front.
 	initialFrameCapacity = 4096
+	// how much of a failing ffmpeg's stderr to keep for the error message
+	maxStderrCapture = 4 << 10
 )
 
 // byte-slice prefixes used while scanning ffmpeg's ametadata output. Kept as
@@ -37,7 +39,7 @@ func (c *Calculator) scan(filename string) (*Result, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), c.executionTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, ffmpeg,
-		"-v", "info",
+		"-v", "error",
 		"-nostdin",
 		"-y",
 		"-i", filename,
@@ -47,6 +49,8 @@ func (c *Calculator) scan(filename string) (*Result, error) {
 		"-f", "null",
 		"null",
 	)
+	var stderr cappedBuffer
+	cmd.Stderr = &stderr
 	filterOutput, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -58,8 +62,10 @@ func (c *Calculator) scan(filename string) (*Result, error) {
 	}
 	frames, loudness, lastTPLR, err := c.parseFFmpegOutput(filterOutput)
 	if err != nil {
-		// a scanner failure (e.g. an over-long line) means we may have only
-		// partial output; drain and reap the process, then surface the error
+		// a scanner failure (e.g. an over-long line) leaves the pipe undrained,
+		// where ffmpeg would block writing to it until the deadline; kill it
+		// first, then reap and surface the error
+		cancel()
 		_ = cmd.Wait()
 		return nil, fmt.Errorf("failed to read ffmpeg output for %q: %w", filename, err)
 	}
@@ -68,6 +74,9 @@ func (c *Calculator) scan(filename string) (*Result, error) {
 	if err := cmd.Wait(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return nil, fmt.Errorf("ffmpeg analysis timed out after %s for %q", c.executionTimeout, filename)
+		}
+		if detail := strings.TrimSpace(stderr.String()); detail != "" {
+			return nil, fmt.Errorf("ffmpeg analysis failed for %q: %w: %s", filename, err, detail)
 		}
 		return nil, fmt.Errorf("ffmpeg analysis failed for %q: %w", filename, err)
 	}
@@ -304,7 +313,9 @@ func (c *Calculator) parseFFmpegOutput(reader io.Reader) (frames []Frame, lastIn
 			if idx := bytes.Index(line, ptsTimePrefix); idx != -1 {
 				tok := firstField(line[idx+len(ptsTimePrefix):])
 				if pts, err := strconv.ParseFloat(string(tok), 64); err == nil {
-					frames = append(frames, Frame{PTSTime: pts})
+					// a frame whose M line never arrives must not read as
+					// full scale, so start it at silence
+					frames = append(frames, Frame{PTSTime: pts, Loudness: math.Inf(-1)})
 					// reset the "last frame" accumulators for the new frame so
 					// they end up holding only the final frame's values
 					lastIntegrated = 0
@@ -322,6 +333,11 @@ func (c *Calculator) parseFFmpegOutput(reader io.Reader) (frames []Frame, lastIn
 		switch {
 		case bytes.HasPrefix(line, mPrefix):
 			if v, err := strconv.ParseFloat(string(line[len(mPrefix):]), 64); err == nil {
+				// ffmpeg reports "nan" on very silent parts of some files;
+				// upstream maps those to -inf so they compare as silence
+				if math.IsNaN(v) {
+					v = math.Inf(-1)
+				}
 				frames[len(frames)-1].Loudness = v
 			}
 		case bytes.HasPrefix(line, iPrefix):
@@ -373,3 +389,22 @@ func firstField(b []byte) []byte {
 	}
 	return b
 }
+
+// cappedBuffer keeps at most maxStderrCapture bytes of what is written to it
+// and discards the rest, so a failing ffmpeg can be quoted in an error without
+// buffering its entire log.
+type cappedBuffer struct {
+	buf bytes.Buffer
+}
+
+func (w *cappedBuffer) Write(p []byte) (int, error) {
+	if room := maxStderrCapture - w.buf.Len(); room > 0 {
+		if len(p) > room {
+			p = p[:room]
+		}
+		_, _ = w.buf.Write(p)
+	}
+	return len(p), nil
+}
+
+func (w *cappedBuffer) String() string { return w.buf.String() }

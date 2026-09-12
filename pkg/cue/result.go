@@ -90,14 +90,14 @@ func (r *Result) MarshalJSON() (out []byte, err error) {
 
 // MarshalNiceJSON - returns pretty formatted json
 func (r *Result) MarshalNiceJSON() (out []byte, err error) {
-	return json.MarshalIndent(r.dto(), " ", " ")
+	return json.MarshalIndent(r.dto(), "", "  ")
 }
 
 // Annotations - result as a map of stringified values, keyed by the same tag
 // names used for JSON. Numeric fields without a unit use 3-decimal precision and
 // bools "true"/"false"; the loudness/gain fields carry their unit suffix, all
 // matching the JSON output.
-func (r *Result) Annotations() (map[string]string, error) {
+func (r *Result) Annotations() map[string]string {
 	d := r.dto()
 	return map[string]string{
 		"duration":               fmt.Sprintf("%.3f", d.Duration),
@@ -116,7 +116,7 @@ func (r *Result) Annotations() (map[string]string, error) {
 		"liq_blank_skipped":      fmt.Sprintf("%t", d.BlankSkipped),
 		"liq_true_peak":          fmt.Sprintf("%.3f", d.TruePeak),
 		"liq_true_peak_db":       d.TruePeakDb,
-	}, nil
+	}
 }
 
 // parseTags builds a Result from existing file tags (the cached/fast path that

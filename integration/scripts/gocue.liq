@@ -6,7 +6,7 @@ let settings.gocue.version =
   settings.make(
     description=
       "Software version of this gocue script.",
-    "1.1.2"
+    "1.2.0"
   )
 
 let settings.gocue.path =
@@ -475,7 +475,7 @@ def gocue(~request_metadata, ~file_metadata, filename) =
       if nice then
         process.quote.command(
           "nice",
-          args=[settings.gocue.path(), ...args()]
+          args=["-n", "18", settings.gocue.path(), ...args()]
         )
       else
         process.quote.command(settings.gocue.path(), args=args())
@@ -510,7 +510,7 @@ def gocue(~request_metadata, ~file_metadata, filename) =
                                      - setting time_to_skip back to 0")
           time_to_skip := 0.0
         end
-        log(level=3, label=label, "Skipping #{time_to_skip} seconds of the playlist")
+        log(level=3, label=label, "Skipping #{time_to_skip()} seconds of the playlist")
       end
     end
 

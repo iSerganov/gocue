@@ -55,11 +55,7 @@ func prepareEnv() error {
 		return err
 	}
 	gocueBin = filepath.Join(outDir, "gocue")
-	build := exec.Command("go", "build",
-		"-o", gocueBin,
-		"-ldflags", "-X github.com/iSerganov/gocue/cmd/cue.version=1.1.2",
-		repoRoot,
-	)
+	build := exec.Command("go", "build", "-o", gocueBin, repoRoot)
 	build.Dir = repoRoot
 	if out, err := build.CombinedOutput(); err != nil {
 		return fmt.Errorf("build gocue: %w\n%s", err, out)
@@ -294,6 +290,9 @@ func metaFloat(t *testing.T, meta map[string]string, key string) float64 {
 		t.Fatalf("missing metadata key %q", key)
 	}
 	fields := strings.Fields(v)
+	if len(fields) == 0 {
+		t.Fatalf("metadata key %q has no value", key)
+	}
 	f, err := strconv.ParseFloat(fields[0], 64)
 	if err != nil {
 		t.Fatalf("parse %s=%q: %v", key, v, err)

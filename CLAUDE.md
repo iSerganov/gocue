@@ -148,9 +148,9 @@ go test ./pkg/cue -run TestCalculatorSuite/TestScanRegression -v
 
 `ffmpeg` and `ffprobe` must be on `PATH` for almost every test in `pkg/cue`.
 Integration tests additionally need `liquidsoap` 2.3.0+ and build their own
-binary into `integration/.bin/`. A Homebrew liquidsoap can break after an ffmpeg
-major upgrade (missing `libswresample` dylib); check `liquidsoap --version`
-before assuming an integration failure is a code problem.
+binary into `integration/.bin/`. Check `liquidsoap --version` before assuming an
+integration failure is a code problem; a Homebrew build can lose its ffmpeg
+dylibs after an ffmpeg major upgrade.
 
 CI runs lint, race tests with coverage, and the Liquidsoap integration job. Keep
 all three green.
@@ -224,22 +224,24 @@ are pinned in `TestScanRegression`. If that test moves, the port has drifted.
 
 ## Gotchas
 
-- Tag lookups are exact-match lowercase against `verifyTags`. ffprobe preserves
-  the case it finds, so ID3 `TXXX` and Opus `R128_TRACK_GAIN` often arrive
-  uppercase and are silently dropped, costing a cache hit. Python lowercases
-  every key first.
-- `parseTags` swallows every parse error. A corrupt `liq_cue_out` becomes `0`
-  with no diagnostic, which reaches Liquidsoap as a zero-length track.
-- `strconv.ParseFloat` accepts `"nan"`. Python maps ebur128 `M=nan` to negative
-  infinity so those frames count as silence; in Go a NaN frame fails both the
-  `>` and the `<=` comparison. This matters for blankskip and sustained-ending
-  detection.
+- Tag keys are lower-cased on the way in, because ffprobe reports them as the
+  container spells them. ID3 `TXXX` frames and Opus `R128_TRACK_GAIN` arrive
+  uppercase. Keep every lookup key in `verifyTags` lowercase.
+- `numericTag` guards the cached path. Every tag the cached `Result` is built
+  from must parse as a number, or the file is re-analysed. Adding a field to
+  `parseTags` means adding its tag there too, otherwise a corrupt value silently
+  becomes zero again.
+- `adjustLoudness` must stay ahead of `doPreAnalysis` in `Calc`. It derives
+  `replaygain_track_gain` from Opus R128 gain, and that tag gates the cache.
+- A frame with no usable momentary loudness is recorded as negative infinity,
+  never zero, so it compares as silence. ffmpeg emits `M=nan` on very silent
+  parts of some files and upstream maps it the same way.
 - The library default execution timeout is 10s, the CLI default is 20s, and
-  `gocue.liq` passes 60s. The same timeout covers both ffprobe and ffmpeg.
-- ffmpeg's stderr is discarded, so a scan failure surfaces only as an exit
-  status. Attach a capture buffer when debugging a scan.
+  `gocue.liq` passes 60s. One timeout covers both ffprobe and ffmpeg, and it
+  does not scale with file length, so a long file on slow hardware needs a
+  larger `-e`.
 - `--nice` means pretty-print JSON here. In Python it means run under `nice(1)`.
-  `gocue.liq` bridges the difference by invoking `nice` itself.
+  `gocue.liq` bridges the difference by invoking `nice -n 18` itself.
 
 ## Conventions
 
@@ -251,10 +253,9 @@ are pinned in `TestScanRegression`. If that test moves, the port has drifted.
 - Fixtures are committed audio. Do not add more large binaries; the repo is
   already heavy. Anything generated at the repo root, such as `nice_out.mp3`,
   is stray and should not be committed.
-- The version string is duplicated in `Makefile`, the README badge,
-  `settings.gocue.version` in `gocue.liq`, the ldflags in
-  `integration/harness_test.go`, and the fallback in `cmd/cue/cue.go`. Update
-  them together.
+- The version string lives in `Makefile`, the README badge, and
+  `settings.gocue.version` in `gocue.liq`. Update those three together. A build
+  without ldflags reports `dev`.
 - `gocue.liq` ships to production despite living under `integration/`. Treat
   changes to it as product changes and mirror them in the README section that
   documents it.
