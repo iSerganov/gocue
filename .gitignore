@@ -12,6 +12,10 @@
 /integration/testdata/*.m3u
 /tmp/
 
+# Example station: generated playlist and local media.
+# The real music never lives here, and example/.env is covered by `.env` below.
+/example/media/
+
 # Test binary, built with `go test -c`
 *.test
 

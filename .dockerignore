@@ -1,0 +1,15 @@
+# Keep the build context small: the image only needs the Go sources.
+.git
+.github
+dist
+example/media
+integration/.bin
+integration/testdata
+pkg/cue/test_data
+*.mp3
+*.wav
+*.ogg
+*.flac
+*.opus
+*.m4a
+*.mp4
