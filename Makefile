@@ -11,6 +11,9 @@ test:
 test-integration:
 	go test -tags=integration ./integration/ -count=1 -timeout 20m
 
+bench:
+	go test ./pkg/cue -run '^$$' -bench '^Benchmark(Calc|Probe|Scan)$$' -benchmem -benchtime 3x -count 10 -timeout 60m
+
 EXAMPLE_COMPOSE = docker compose -f example/docker-compose.yml
 
 example-env:
@@ -42,4 +45,4 @@ example-down:
 example-logs:
 	$(EXAMPLE_COMPOSE) logs -f station
 
-.PHONY: build test test-integration example-env example-playlist example-up example-down example-logs
+.PHONY: build test test-integration bench example-env example-playlist example-up example-down example-logs

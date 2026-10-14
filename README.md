@@ -380,7 +380,7 @@ go test -tags=integration ./integration/ -count=1 -timeout 10m
 # or: make test-integration
 ```
 
-Requires `ffmpeg` / `ffprobe` on `PATH` for scan/probe tests. Integration tests also need `liquidsoap` and use fixtures under `integration/testdata/` with scripts in `integration/scripts/`.
+Requires `ffmpeg` / `ffprobe` 9.0.1 on `PATH` for scan/probe tests; CI installs that version through [`.github/actions/setup-ffmpeg`](.github/actions/setup-ffmpeg/action.yml) and fails if a different one is found. Integration tests also need `liquidsoap` and use fixtures under `integration/testdata/` with scripts in `integration/scripts/`.
 
 ## Project structure
 

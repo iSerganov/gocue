@@ -33,10 +33,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - name: Install ffmpeg
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
+      - uses: ./.github/actions/setup-ffmpeg
       - name: Build
         run: go build ./...
       - name: Test (race + coverage)
@@ -74,10 +71,10 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - name: Install ffmpeg and liquidsoap
+      - uses: ./.github/actions/setup-ffmpeg
+      - name: Install liquidsoap
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
           curl -fsSL -O "https://github.com/savonet/liquidsoap/releases/download/v${LIQUIDSOAP_VERSION}/${LIQUIDSOAP_DEB}"
           sudo apt-get install -y "./${LIQUIDSOAP_DEB}"
           rm -f "${LIQUIDSOAP_DEB}"

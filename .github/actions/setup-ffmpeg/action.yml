@@ -1,0 +1,23 @@
+name: Set up FFmpeg 9.0.1
+description: Installs a static FFmpeg 9.0.1 build ahead of any system ffmpeg on PATH and fails unless ffmpeg and ffprobe report 9.0.1.
+
+runs:
+  using: composite
+  steps:
+    - name: Download FFmpeg 9.0.1
+      shell: bash
+      run: |
+        dir="$RUNNER_TOOL_CACHE/ffmpeg-9.0.1"
+        mkdir -p "$dir"
+        curl -fsSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-31-13-27/ffmpeg-n9.0.1-11-ge47273f4d9-linux64-gpl-9.0.tar.xz" \
+          | tar -xJ --strip-components=1 -C "$dir"
+        echo "$dir/bin" >> "$GITHUB_PATH"
+    - name: Verify FFmpeg version
+      shell: bash
+      run: |
+        for bin in ffmpeg ffprobe; do
+          command -v "$bin"
+          "$bin" -version | head -1
+          "$bin" -version | head -1 | grep -Eq "^$bin version n?9\.0\.1([^0-9]|$)" \
+            || { echo "::error::$bin is not FFmpeg 9.0.1"; exit 1; }
+        done
