@@ -8,6 +8,8 @@
 *.so
 *.dylib
 /dist
+# static FFmpeg built by `make ffmpeg`
+/.ffmpeg/
 /integration/.bin/
 /integration/testdata/*.m3u
 /tmp/

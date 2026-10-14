@@ -21,7 +21,7 @@ typedef struct {
     double integrated, true_peak, loudness_range;
 } gocue_scan_result;
 
-gocue_scan_result *gocue_scan(const char *path, const char *filters, int64_t timeout_us, int *err);
+gocue_scan_result *gocue_scan(const char *path, double target, int64_t timeout_us, int *err);
 void gocue_scan_free(gocue_scan_result *res);
 
 #endif

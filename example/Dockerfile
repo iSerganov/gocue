@@ -6,20 +6,13 @@
 
 FROM golang:1.27 AS build
 
-# gocue links libav through cgo. Liquidsoap's image carries FFmpeg 7.1, so
-# gocue gets its own FFmpeg 9.0.1, the version the tests run against.
-ARG TARGETARCH
+# gocue links a static FFmpeg 9.0.1, the version the tests run against, built
+# by the same script as CI. Liquidsoap's image keeps its own FFmpeg 7.1.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends xz-utils \
- && rm -rf /var/lib/apt/lists/* \
- && case "$TARGETARCH" in \
-      amd64) arch=linux64 ;; \
-      arm64) arch=linuxarm64 ;; \
-      *) echo "no FFmpeg 9.0.1 build for $TARGETARCH" >&2; exit 1 ;; \
-    esac \
- && mkdir -p /opt/ffmpeg \
- && curl -fsSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-31-13-27/ffmpeg-n9.0.1-11-ge47273f4d9-${arch}-gpl-shared-9.0.tar.xz" \
-    | tar -xJ --strip-components=1 -C /opt/ffmpeg
+ && apt-get install -y --no-install-recommends nasm xz-utils \
+ && rm -rf /var/lib/apt/lists/*
+COPY scripts/build-ffmpeg.sh /tmp/build-ffmpeg.sh
+RUN /tmp/build-ffmpeg.sh /opt/ffmpeg
 
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -30,17 +23,11 @@ COPY cmd/ ./cmd/
 COPY pkg/ ./pkg/
 
 ARG VERSION=dev
-RUN PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig \
-    CGO_LDFLAGS="-Wl,-rpath,/opt/ffmpeg/lib -Wl,--disable-new-dtags" \
-    go build \
+RUN PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig go build \
       -ldflags "-X github.com/iSerganov/gocue/cmd/cue.version=${VERSION}" \
       -o /out/gocue .
 
 FROM savonet/liquidsoap:v2.4.5
-
-# gocue loads these libraries through its rpath. Liquidsoap keeps using its
-# own FFmpeg 7.1.
-COPY --from=build /opt/ffmpeg/lib /opt/ffmpeg/lib
 
 COPY --from=build /out/gocue /usr/local/bin/gocue
 

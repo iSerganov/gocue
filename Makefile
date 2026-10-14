@@ -1,18 +1,27 @@
 VERSION ?= 1.3.0
+FFMPEG_PREFIX ?= $(CURDIR)/.ffmpeg
+
+# Once `make ffmpeg` has built the static FFmpeg, every Go command links
+# against it. CGO_* flags from the environment are cleared so they cannot
+# point the link back at a shared FFmpeg.
+FFMPEG_ENV = $(if $(wildcard $(FFMPEG_PREFIX)/lib/pkgconfig),PKG_CONFIG_PATH=$(FFMPEG_PREFIX)/lib/pkgconfig CGO_CFLAGS= CGO_CPPFLAGS= CGO_LDFLAGS=)
+
+ffmpeg:
+	scripts/build-ffmpeg.sh $(FFMPEG_PREFIX)
 
 build:
 	@echo "building gocue..."
-	go build -o ./dist/gocue -ldflags="-X 'github.com/iSerganov/gocue/cmd/cue.version=${VERSION}'" main.go
+	$(FFMPEG_ENV) go build -o ./dist/gocue -ldflags="-X 'github.com/iSerganov/gocue/cmd/cue.version=${VERSION}'" main.go
 	@echo "building of gocue completed."
 
 test:
-	go test -race -count=1 ./...
+	$(FFMPEG_ENV) go test -race -count=1 ./...
 
 test-integration:
-	go test -tags=integration ./integration/ -count=1 -timeout 20m
+	$(FFMPEG_ENV) go test -tags=integration ./integration/ -count=1 -timeout 20m
 
 bench:
-	go test ./pkg/cue -run '^$$' -bench '^Benchmark(Calc|Probe|Scan)$$' -benchmem -benchtime 3x -count 10 -timeout 60m
+	$(FFMPEG_ENV) go test ./pkg/cue -run '^$$' -bench '^Benchmark(Calc|Probe|Scan)$$' -benchmem -benchtime 3x -count 10 -timeout 60m
 
 EXAMPLE_COMPOSE = docker compose -f example/docker-compose.yml
 
@@ -45,4 +54,4 @@ example-down:
 example-logs:
 	$(EXAMPLE_COMPOSE) logs -f station
 
-.PHONY: build test test-integration bench example-env example-playlist example-up example-down example-logs
+.PHONY: ffmpeg build test test-integration bench example-env example-playlist example-up example-down example-logs

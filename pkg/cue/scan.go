@@ -9,8 +9,7 @@ import (
 // cueing and loudness values from the per-frame momentary loudness
 // measurements.
 func (c *Calculator) scan(filename string) (*Result, error) {
-	filters := fmt.Sprintf("ebur128=target=%.3f:peak=true:metadata=1", c.targetLoudness)
-	measured, err := scanFile(filename, filters, c.executionTimeout)
+	measured, err := scanFile(filename, c.targetLoudness, c.executionTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("analysis failed for %q: %w", filename, err)
 	}
