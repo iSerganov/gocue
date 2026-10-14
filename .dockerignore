@@ -1,6 +1,7 @@
 # Keep the build context small: the image only needs the Go sources.
 .git
 .github
+.ffmpeg
 dist
 example/media
 integration/.bin

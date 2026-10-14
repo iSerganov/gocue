@@ -1,10 +1,26 @@
 name: Set up FFmpeg 9.0.1
-description: Installs a shared FFmpeg 9.0.1 build (binaries, libraries, headers) ahead of any system ffmpeg, points cgo at it, and fails unless ffmpeg, ffprobe and libavformat report 9.0.1.
+description: Restores or builds the static FFmpeg 9.0.1 libraries gocue links against, installs FFmpeg 9.0.1's ffmpeg and ffprobe for the tests, and fails unless both report 9.0.1.
 
 runs:
   using: composite
   steps:
-    - name: Download FFmpeg 9.0.1
+    - name: Restore the static FFmpeg build
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: .ffmpeg
+        key: ffmpeg-static-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-ffmpeg.sh') }}
+    - name: Build the static FFmpeg
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y nasm
+        scripts/build-ffmpeg.sh "$GITHUB_WORKSPACE/.ffmpeg"
+    - name: Point cgo at the static FFmpeg
+      shell: bash
+      run: echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/.ffmpeg/lib/pkgconfig" >> "$GITHUB_ENV"
+    - name: Download ffmpeg and ffprobe 9.0.1 for the tests
       shell: bash
       run: |
         dir="$RUNNER_TOOL_CACHE/ffmpeg-9.0.1"
@@ -12,10 +28,6 @@ runs:
         curl -fsSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-31-13-27/ffmpeg-n9.0.1-11-ge47273f4d9-linux64-gpl-shared-9.0.tar.xz" \
           | tar -xJ --strip-components=1 -C "$dir"
         echo "$dir/bin" >> "$GITHUB_PATH"
-        echo "PKG_CONFIG_PATH=$dir/lib/pkgconfig" >> "$GITHUB_ENV"
-        # DT_RPATH, unlike the default DT_RUNPATH, also resolves libavformat's
-        # own dependency on libavcodec from this directory
-        echo "CGO_LDFLAGS=-Wl,-rpath,$dir/lib -Wl,--disable-new-dtags" >> "$GITHUB_ENV"
     - name: Verify FFmpeg version
       shell: bash
       run: |

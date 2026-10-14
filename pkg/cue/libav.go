@@ -54,13 +54,14 @@ type ebur128Output struct {
 	loudnessRange float64
 }
 
-// scanFile decodes the best audio stream of path through filters.
-func scanFile(path, filters string, timeout time.Duration) (ebur128Output, error) {
-	cPath, cFilters := C.CString(path), C.CString(filters)
+// scanFile decodes the best audio stream of path and measures it with
+// ebur128 at the target loudness, the true peak of each channel on its own
+// thread.
+func scanFile(path string, target float64, timeout time.Duration) (ebur128Output, error) {
+	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
-	defer C.free(unsafe.Pointer(cFilters))
 	var code C.int
-	res := C.gocue_scan(cPath, cFilters, C.int64_t(timeout.Microseconds()), &code)
+	res := C.gocue_scan(cPath, C.double(target), C.int64_t(timeout.Microseconds()), &code)
 	if res == nil {
 		return ebur128Output{}, avError(code, timeout)
 	}

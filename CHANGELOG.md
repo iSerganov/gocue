@@ -7,8 +7,10 @@ All notable changes to gocue are recorded here. The format follows
 ## [1.3.0] - 2026-10-13
 
 gocue no longer starts `ffmpeg` or `ffprobe`. It reads tags and measures
-loudness in-process through FFmpeg's libraries (libav) via cgo. For the same
-file and flags it prints the same JSON as 1.2.0, byte for byte.
+loudness in-process through a static, minimal FFmpeg (libav) via cgo, with
+each channel's true peak on its own thread. For the same file and flags it
+prints the same JSON as 1.2.0, byte for byte, about 4.6 times faster on an
+already-tagged file and 43% faster for a full analysis.
 
 ### Changed
 
@@ -20,19 +22,26 @@ file and flags it prints the same JSON as 1.2.0, byte for byte.
   times, momentary and integrated loudness, true peak and loudness range are
   identical to the old path on every test file and at more than one target
   loudness. Cue points match Python autocue as before.
+- True peak, about three quarters of a full analysis, is measured per channel
+  on separate threads while the loudness frames come from a second graph.
+  Each channel's peak is identical to the multichannel measurement. Wall time
+  drops by 43%; CPU time rises because each channel's graph repeats the cheap
+  loudness work, which the ebur128 filter cannot skip.
 - Failures name libav's reason, such as `analysis failed for "a.mp3": No such
   file or directory`, instead of a process exit status. A timeout reads
   `timed out after 20s` and is checked inside libav's reads.
-- Building gocue needs Go 1.27, a C compiler, FFmpeg's headers and
-  `pkg-config`. FFmpeg 9.0.1 is the tested version. On Linux, link with
-  `-Wl,-rpath,<dir>/lib -Wl,--disable-new-dtags` when the libraries live
-  outside the system path; the README explains why.
-- The example Docker station builds gocue against FFmpeg 9.0.1's shared
-  libraries for amd64 and arm64 and ships them under `/opt/ffmpeg/lib`.
-  Liquidsoap keeps its own FFmpeg 7.1. The image no longer installs the
-  `ffmpeg` binary.
-- CI installs a pinned FFmpeg 9.0.1 build for building, linting and testing,
-  and fails if any other version is found. golangci-lint is pinned to v2.14.0,
+- Building gocue needs Go 1.27, a C compiler, `make`, `curl`, `xz`,
+  `pkg-config` and, on x86, `nasm`. `make ffmpeg` builds a static FFmpeg
+  9.0.1 with only FFmpeg's own demuxers, decoders and parsers and the filters
+  gocue uses, and every `make` target links it. A start then loads no FFmpeg
+  or codec library; a full shared FFmpeg such as Homebrew's still works but
+  adds about 20 ms of library loading to every run.
+- The example Docker station builds the same static FFmpeg and ships only the
+  `gocue` binary, which links nothing but libc and libm. Liquidsoap keeps its
+  own FFmpeg 7.1. The image no longer installs the `ffmpeg` binary.
+- CI builds the static FFmpeg 9.0.1 once per build-script change and caches
+  it, installs a pinned FFmpeg 9.0.1 `ffmpeg` and `ffprobe` for the tests, and
+  fails if any other version is found. golangci-lint is pinned to v2.14.0,
   the first release that type-checks Go 1.27 code here.
 
 ### Added
@@ -40,6 +49,8 @@ file and flags it prints the same JSON as 1.2.0, byte for byte.
 - `BenchmarkCalc` and `BenchmarkProbe` on the three longest test files, and a
   `make bench` target that runs them with fixed iterations so separate runs
   can be compared with benchstat.
+- `make ffmpeg` and `scripts/build-ffmpeg.sh`, a pinned and checksummed
+  static FFmpeg 9.0.1 build used locally, in CI and in the example image.
 - The `.github/actions/setup-ffmpeg` action used by every CI job.
 - This changelog.
 
@@ -50,18 +61,18 @@ file and flags it prints the same JSON as 1.2.0, byte for byte.
 
 ### Performance
 
-Measured against 1.2.0 on the three longest test files (748–948 s of audio)
-with FFmpeg 9.0.1 on an Apple M4 Max. The README has the full table.
+Measured against 1.2.0 on the three longest test files (748–948 s of stereo
+audio) with FFmpeg 9.0.1 on an Apple M4 Max. The README has the full table.
 
-- The tag probe, which is all the cached path does, is 70× to 109× faster:
-  0.21–0.33 ms instead of about 23 ms.
-- A full analysis is 1.9% to 4.3% faster, and 10% faster on a 113 s file.
-- The `gocue` command uses 16% less CPU time and 91% less kernel time. Its
-  wall time is 0.6% to 1.2% shorter, because decoding and the loudness
-  measurement were already libav code and still dominate a long file.
+- On an already-tagged file, the cached path, the `gocue` command takes
+  4.2 ms instead of 19.3 ms, 4.6 times faster, with 22% less peak memory.
+- A full analysis is 44% faster, and the `gocue` command finishes 43%
+  sooner. It uses 16% to 17% more CPU time but 77% less kernel time. Short
+  files gain about as much: the scan of a 113 s file is 47% faster.
 - Go allocates 86% less memory per analysis and 67% fewer objects. Peak RSS
-  is 28–29 MiB for the single process. 1.2.0 reported about 25 MiB, most
-  likely the ffmpeg child's peak, with gocue's own process running alongside.
+  for a full analysis is 26–27 MiB in a single process. 1.2.0 reported about
+  25 MiB, most likely the ffmpeg child's peak, with gocue's own process
+  running alongside.
 
 ## [1.2.0] - 2026-09-12
 

@@ -25,9 +25,11 @@ For algorithm background, see [Moonbase59’s autocue presentation](https://moon
 
 ### Prerequisites
 
-- Go 1.27 or higher and a C compiler (gocue uses cgo)
-- FFmpeg's shared libraries and headers, found through `pkg-config` (`libavformat`, `libavcodec`, `libavfilter`, `libavutil`). FFmpeg 9.0.1 is the tested version. On macOS, `brew install ffmpeg pkg-config` is enough. On Linux, distribution packages are usually older, so a shared build such as [BtbN's](https://github.com/BtbN/FFmpeg-Builds) with `PKG_CONFIG_PATH` pointing at its `lib/pkgconfig` works; link with `CGO_LDFLAGS="-Wl,-rpath,<dir>/lib -Wl,--disable-new-dtags"` so the binary finds the libraries at run time.
+- Go 1.27 or higher, a C compiler, `make`, `curl`, `xz` and `pkg-config` (gocue uses cgo)
+- `nasm` on x86, for FFmpeg's assembly optimisations
 - An audio file to analyze
+
+gocue links FFmpeg 9.0.1 statically. `make ffmpeg` downloads it and builds the libraries into `.ffmpeg/` (under a minute on a fast machine), and every `make` target then uses them. That build holds FFmpeg's own demuxers, decoders and parsers and the few filters gocue needs, and no external libraries, so the binary starts without loading any FFmpeg or codec library: a run on an already-tagged file takes about 4 ms. A shared FFmpeg found through `pkg-config` also works, for example Homebrew's, but a full build loads dozens of libraries at every start; on Linux, also link it with `CGO_LDFLAGS="-Wl,-rpath,<dir>/lib -Wl,--disable-new-dtags"`.
 
 ### Installation
 
@@ -36,6 +38,7 @@ For algorithm background, see [Moonbase59’s autocue presentation](https://moon
 ```bash
 git clone https://github.com/iSerganov/gocue.git
 cd gocue
+make ffmpeg   # once: static FFmpeg 9.0.1 in .ffmpeg/
 make build
 # binary: ./dist/gocue  (version injected via ldflags from Makefile VERSION)
 ```
@@ -45,6 +48,8 @@ make build
 ```bash
 go install github.com/iSerganov/gocue@latest
 ```
+
+This links whatever FFmpeg `pkg-config` finds, so build the static one first and point `PKG_CONFIG_PATH` at its `lib/pkgconfig` for the fast start-up described above.
 
 ### Basic usage
 
@@ -368,19 +373,21 @@ done
 - Reuses complete tags from the file when possible (read-only cache)
 - Configurable `--exec_timeout` for probe/scan
 
-**1.3.0 against 1.2.0**, on the three longest test files (748–948 s of Ogg Vorbis), Apple M4 Max, FFmpeg 9.0.1. Go figures are medians of 10 `make bench` samples. Command wall times are medians of 10 hyperfine runs. These time and memory changes are significant at p < 0.01 by benchstat. CPU and kernel time are hyperfine means; peak RSS is one `/usr/bin/time -l` run per file.
+**1.3.0 against 1.2.0**, on the three longest test files (748–948 s of stereo Ogg Vorbis), Apple M4 Max, FFmpeg 9.0.1 linked statically. Go figures are medians of 10 `make bench` samples, and command wall times medians of 10 hyperfine runs; these time and memory changes are significant at p < 0.01 by benchstat. The cached-path command time is the mean of 50 hyperfine runs on a fully tagged copy of the longest file. CPU and kernel time are hyperfine means; peak RSS is one `/usr/bin/time -l` run per file.
 
 | Measure | 1.2.0 | 1.3.0 | Change |
 |---|---|---|---|
-| Tag probe, the whole cost of the cached path | 22.8–23.0 ms | 0.21–0.33 ms | 70× to 109× faster |
-| Full analysis (`Calc`) | 2.730–3.370 s | 2.616–3.307 s | 1.9% to 4.3% faster |
-| `gocue` command, wall time | 2.687–3.377 s | 2.657–3.357 s | 0.6% to 1.2% faster |
-| `gocue` command, CPU time (user + sys) | 3.16–3.98 s | 2.65–3.35 s | 16% less |
-| `gocue` command, kernel (sys) time | 0.24–0.30 s | 0.02–0.03 s | 91% less |
+| `gocue` command on an already-tagged file (the cached path) | 19.3 ms | 4.2 ms | 4.6× faster |
+| Tag probe inside gocue | 22.8–23.0 ms | 0.18–0.31 ms | 75× to 125× faster |
+| Full analysis (`Calc`) | 2.730–3.370 s | 1.518–1.899 s | 44% faster |
+| `gocue` command, full analysis, wall time | 2.687–3.377 s | 1.517–1.916 s | 43% faster |
+| `gocue` command, full analysis, CPU time (user + sys) | 3.16–3.98 s | 3.68–4.61 s | 16% to 17% more |
+| `gocue` command, full analysis, kernel (sys) time | 0.24–0.30 s | 0.05–0.07 s | 77% less |
 | Go memory allocated per analysis | 1.69–2.20 MiB | 0.23–0.29 MiB | 86% less |
-| Peak RSS | 24.7–25.1 MiB, most likely the ffmpeg child | 28.1–29.0 MiB | one process instead of two |
+| Peak RSS, cached path | 17.0 MiB | 13.3 MiB | 22% less |
+| Peak RSS, full analysis | 24.7–25.1 MiB, most likely the ffmpeg child | 26.1–27.0 MiB | one process instead of two |
 
-Wall time barely moves because decoding and the `ebur128` measurement are the same libav code in both versions, and they dominate a long file. What 1.3.0 removes is the second process, the pipe, and printing and parsing every frame as text. That shows up as CPU time rather than wall time, because in 1.2.0 ffmpeg and gocue's parser ran side by side on two cores. Short files gain more: the full scan of the 113 s `sample.ogg` is 10% faster.
+Three changes produce these numbers. gocue no longer starts ffprobe or ffmpeg, so there is no second process, no pipe, and no printing and parsing of every frame as text. It links a minimal static FFmpeg, so a start loads no FFmpeg or codec library; that is what makes the cached path fast. And it measures true peak, about three quarters of a full analysis, per channel on separate threads. That last step is why a full analysis takes more CPU time while finishing 43% sooner: ebur128 cannot measure the peak alone, so each channel's thread repeats the cheap loudness part. `gocue.liq` runs gocue under `nice -n 18`, so the extra work never competes with Liquidsoap's own audio thread. Mono files get the startup and parsing gains but not the parallel peak.
 
 ## Testing
 
@@ -394,7 +401,7 @@ go test -tags=integration ./integration/ -count=1 -timeout 10m
 # or: make test-integration
 ```
 
-Requires FFmpeg 9.0.1: the libraries through `pkg-config` for the build, and `ffmpeg` / `ffprobe` on `PATH` for preparing tagged test files and for the integration harness. CI installs that version through [`.github/actions/setup-ffmpeg`](.github/actions/setup-ffmpeg/action.yml) and fails if a different one is found. Integration tests also need `liquidsoap` and use fixtures under `integration/testdata/` with scripts in `integration/scripts/`.
+Requires FFmpeg 9.0.1: the libraries from `make ffmpeg` (or `pkg-config`) for the build, and `ffmpeg` / `ffprobe` on `PATH` for preparing tagged test files and for the integration harness. CI installs that version through [`.github/actions/setup-ffmpeg`](.github/actions/setup-ffmpeg/action.yml) and fails if a different one is found. Integration tests also need `liquidsoap` and use fixtures under `integration/testdata/` with scripts in `integration/scripts/`.
 
 ## Project structure
 

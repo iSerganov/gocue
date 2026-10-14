@@ -139,6 +139,7 @@ Two hard rules that shape everything else:
 ## Commands
 
 ```bash
+make ffmpeg                # once: static FFmpeg 9.0.1 into .ffmpeg/ (scripts/build-ffmpeg.sh)
 make build                 # -> ./dist/gocue, version injected via ldflags
 make test                  # go test -race -count=1 ./...
 make test-integration      # needs liquidsoap; go test -tags=integration ./integration/
@@ -146,12 +147,15 @@ golangci-lint run --timeout=5m
 go test ./pkg/cue -run TestCalculatorSuite/TestScanRegression -v
 ```
 
-`pkg/cue` links FFmpeg 9.0.1's libraries through cgo, found with `pkg-config`
-(Homebrew's `ffmpeg` and `pkg-config` locally). gocue itself starts no
-processes, but tests still need `ffmpeg` and `ffprobe` on `PATH` to prepare
-tagged copies, and the integration harness calls `ffprobe`. On Linux, link with
-`-Wl,--disable-new-dtags` as the CI action does, or libavformat cannot find
-libavcodec at run time. Integration tests additionally need `liquidsoap` 2.3.0+ and build their own
+`pkg/cue` links FFmpeg 9.0.1 through cgo and `pkg-config`. Once `make ffmpeg`
+has built the static libraries, every `make` target uses them and clears
+`CGO_CFLAGS`, `CGO_CPPFLAGS` and `CGO_LDFLAGS`, which would otherwise put a
+shared FFmpeg (such as Homebrew's) first on the link line. Plain `go` commands
+need `PKG_CONFIG_PATH=$PWD/.ffmpeg/lib/pkgconfig` and those variables unset to
+match. Benchmark only static builds: a shared full FFmpeg adds about 20 ms of
+library loading to every run. gocue itself starts no processes, but tests
+still need `ffmpeg` and `ffprobe` on `PATH` to prepare tagged copies, and the
+integration harness calls `ffprobe`. Integration tests additionally need `liquidsoap` 2.3.0+ and build their own
 binary into `integration/.bin/`. Check `liquidsoap --version` before assuming an
 integration failure is a code problem; a Homebrew build can lose its ffmpeg
 dylibs after an ffmpeg major upgrade.
@@ -165,7 +169,8 @@ all three green.
 |------|------|
 | [cmd/cue/cue.go](cmd/cue/cue.go) | Cobra CLI, flag ranges, JSON printing |
 | [pkg/cue/calculator.go](pkg/cue/calculator.go) | Tag probe, cached fast path, gain math |
-| [pkg/cue/libav.go](pkg/cue/libav.go), [libav.c](pkg/cue/libav.c) | cgo layer: reads durations and tags as ffprobe would, and runs the ebur128 graph as the ffmpeg CLI did |
+| [pkg/cue/libav.go](pkg/cue/libav.go), [libav.c](pkg/cue/libav.c) | cgo layer: reads durations and tags as ffprobe would, and runs ebur128 as the ffmpeg CLI did, with each channel's true peak on its own thread |
+| [scripts/build-ffmpeg.sh](scripts/build-ffmpeg.sh) | Pinned, checksummed static FFmpeg 9.0.1 build used by `make ffmpeg`, CI and the example image |
 | [pkg/cue/scan.go](pkg/cue/scan.go) | Full ebur128 scan and all cue/overlay math |
 | [pkg/cue/result.go](pkg/cue/result.go) | Numeric `Result`, unit suffixes applied only at marshal time |
 | [pkg/cue/frame.go](pkg/cue/frame.go) | One ebur128 frame (PTS + momentary loudness) |
@@ -246,6 +251,11 @@ are pinned in `TestScanRegression`. If that test moves, the port has drifted.
   final chunk under 100 ms), and `tsTime` turns each PTS into the decimal
   `av_ts2timestr` printed before parsing it back. Without either, frame counts
   or JSON times such as `112.39999999999999` drift from upstream.
+- True peak is measured per channel, one `pan=mono|c0=cN,ebur128=peak=true`
+  graph per thread, while a second ebur128 graph without `peak` supplies the
+  loudness frames. Each channel's peak is identical to the multichannel
+  measurement, so the output did not change; the per-channel graphs only cost
+  extra CPU because ebur128 cannot measure the peak alone.
 - The library default execution timeout is 10s, the CLI default is 20s, and
   `gocue.liq` passes 60s. One timeout covers both the probe and the scan, and it
   does not scale with file length, so a long file on slow hardware needs a
