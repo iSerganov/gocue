@@ -89,7 +89,7 @@ static int record(gocue_scan_result *res, const AVFrame *frame) {
     while ((e = av_dict_iterate(frame->metadata, e))) {
         if (strncmp(e->key, "lavfi.r128.true_peaks_ch", 24) || !parse_double(e->value, &v))
             continue;
-        res->true_peak = isnan(res->true_peak) || isnan(v) ? NAN : fmax(res->true_peak, v);
+        res->true_peak = isnan(res->true_peak) || isnan(v) ? NAN : v > res->true_peak ? v : res->true_peak;
     }
     return 0;
 }
