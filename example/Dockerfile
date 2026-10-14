@@ -6,6 +6,21 @@
 
 FROM golang:1.26 AS build
 
+# gocue links libav through cgo. Liquidsoap's image carries FFmpeg 7.1, so
+# gocue gets its own FFmpeg 9.0.1, the version the tests run against.
+ARG TARGETARCH
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends xz-utils \
+ && rm -rf /var/lib/apt/lists/* \
+ && case "$TARGETARCH" in \
+      amd64) arch=linux64 ;; \
+      arm64) arch=linuxarm64 ;; \
+      *) echo "no FFmpeg 9.0.1 build for $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+ && mkdir -p /opt/ffmpeg \
+ && curl -fsSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-31-13-27/ffmpeg-n9.0.1-11-ge47273f4d9-${arch}-gpl-shared-9.0.tar.xz" \
+    | tar -xJ --strip-components=1 -C /opt/ffmpeg
+
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -15,18 +30,19 @@ COPY cmd/ ./cmd/
 COPY pkg/ ./pkg/
 
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build \
+RUN PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig \
+    CGO_LDFLAGS="-Wl,-rpath,/opt/ffmpeg/lib -Wl,--disable-new-dtags" \
+    go build \
       -ldflags "-X github.com/iSerganov/gocue/cmd/cue.version=${VERSION}" \
       -o /out/gocue .
 
 FROM savonet/liquidsoap:v2.4.5
 
-# gocue shells out to ffmpeg and ffprobe. The Liquidsoap image links the ffmpeg
-# libraries but ships neither binary.
-USER root
-RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg \
- && rm -rf /var/lib/apt/lists/*
+# gocue loads these libraries through its rpath and still runs the ffmpeg
+# binary for the loudness scan. Liquidsoap keeps using its own FFmpeg 7.1.
+COPY --from=build /opt/ffmpeg/lib /opt/ffmpeg/lib
+COPY --from=build /opt/ffmpeg/bin/ffmpeg /opt/ffmpeg/bin/ffmpeg
+ENV PATH=/opt/ffmpeg/bin:$PATH
 
 COPY --from=build /out/gocue /usr/local/bin/gocue
 

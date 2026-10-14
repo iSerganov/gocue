@@ -1,5 +1,5 @@
 name: Set up FFmpeg 9.0.1
-description: Installs a static FFmpeg 9.0.1 build ahead of any system ffmpeg on PATH and fails unless ffmpeg and ffprobe report 9.0.1.
+description: Installs a shared FFmpeg 9.0.1 build (binaries, libraries, headers) ahead of any system ffmpeg, points cgo at it, and fails unless ffmpeg, ffprobe and libavformat report 9.0.1.
 
 runs:
   using: composite
@@ -9,9 +9,13 @@ runs:
       run: |
         dir="$RUNNER_TOOL_CACHE/ffmpeg-9.0.1"
         mkdir -p "$dir"
-        curl -fsSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-31-13-27/ffmpeg-n9.0.1-11-ge47273f4d9-linux64-gpl-9.0.tar.xz" \
+        curl -fsSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-31-13-27/ffmpeg-n9.0.1-11-ge47273f4d9-linux64-gpl-shared-9.0.tar.xz" \
           | tar -xJ --strip-components=1 -C "$dir"
         echo "$dir/bin" >> "$GITHUB_PATH"
+        echo "PKG_CONFIG_PATH=$dir/lib/pkgconfig" >> "$GITHUB_ENV"
+        # DT_RPATH, unlike the default DT_RUNPATH, also resolves libavformat's
+        # own dependency on libavcodec from this directory
+        echo "CGO_LDFLAGS=-Wl,-rpath,$dir/lib -Wl,--disable-new-dtags" >> "$GITHUB_ENV"
     - name: Verify FFmpeg version
       shell: bash
       run: |
@@ -21,3 +25,6 @@ runs:
           "$bin" -version | head -1 | grep -Eq "^$bin version n?9\.0\.1([^0-9]|$)" \
             || { echo "::error::$bin is not FFmpeg 9.0.1"; exit 1; }
         done
+        pkg-config --modversion libavformat
+        [ "$(pkg-config --modversion libavformat)" = "63.1.101" ] \
+          || { echo "::error::cgo would not build against FFmpeg 9.0.1's libavformat"; exit 1; }

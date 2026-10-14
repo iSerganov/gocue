@@ -17,6 +17,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      - uses: ./.github/actions/setup-ffmpeg
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:

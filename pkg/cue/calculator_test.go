@@ -25,80 +25,113 @@ func TestCalculatorSuite(t *testing.T) {
 	suite.Run(t, &CalculatorSuite{})
 }
 
+// TestProbe pins the durations to the strings ffprobe 9.0.1 prints for the
+// fixtures, so the cached path keeps reading the same values.
 func (s *CalculatorSuite) TestProbe() {
-	calc := &Calculator{executionTimeout: 5 * time.Second}
-	res, err := calc.probe("test_data/classic.wav")
-	s.NoError(err)
-	fmt.Printf("gocue probing returned %+v\n", res)
+	tests := []struct {
+		file         string
+		wantDuration string
+	}{
+		{file: "test_data/classic.wav", wantDuration: "103.735624"},
+		{file: "test_data/sample.ogg", wantDuration: "112.758118"},
+		{file: "test_data/tch_big.ogg", wantDuration: "747.702857"},
+	}
 
-	res, err = calc.probe("test_data/sample.ogg")
-	s.NoError(err)
-	fmt.Printf("gocue probing returned %+v\n", res)
+	for _, tc := range tests {
+		s.Run(tc.file, func() {
+			calc := &Calculator{executionTimeout: 5 * time.Second}
+
+			tags, err := calc.probe(tc.file)
+
+			s.Require().NoError(err)
+			s.Equal(tc.wantDuration, tags["duration"])
+		})
+	}
 }
 
-// TestTagsFromProbeJSON verifies format-level tags are merged (FLAC/MP3-style
+func (s *CalculatorSuite) TestProbeErrors() {
+	tests := []struct {
+		name    string
+		file    string
+		timeout time.Duration
+		wantErr string
+	}{
+		{name: "missing file names the reason", file: "test_data/does_not_exist.wav", timeout: 5 * time.Second, wantErr: "No such file or directory"},
+		{name: "non-audio file names the reason", file: "calculator.go", timeout: 5 * time.Second, wantErr: "Invalid data found when processing input"},
+		{name: "expired deadline reports a timeout", file: "test_data/tch_big.ogg", timeout: time.Nanosecond, wantErr: "timed out after 1ns"},
+	}
+
+	for _, tc := range tests {
+		s.Run(tc.name, func() {
+			calc := &Calculator{executionTimeout: tc.timeout}
+
+			_, err := calc.probe(tc.file)
+
+			s.Require().Error(err)
+			s.Contains(err.Error(), tc.wantErr)
+		})
+	}
+}
+
+// TestTagsFromProbe verifies format-level tags are merged (FLAC/MP3-style
 // containers) and that audio-stream tags overlay them on key conflicts.
-func (s *CalculatorSuite) TestTagsFromProbeJSON() {
-	calc := NewCalculator(nil)
+func (s *CalculatorSuite) TestTagsFromProbe() {
+	tests := []struct {
+		name   string
+		probed probePayload
+		want   map[string]string
+	}{
+		{
+			name: "format tags alone enable cache fields and stream duration wins",
+			probed: probePayload{
+				Streams: []probeStream{{CodecType: "audio", Duration: "12.5", Tags: map[string]string{}}},
+				Format: probeFormat{Duration: "12.345", Tags: map[string]string{
+					"liq_cue_in":            "0.100",
+					"liq_cue_out":           "12.000",
+					"liq_cross_start_next":  "11.500",
+					"replaygain_track_gain": "-3.200 dB",
+					"ignored_artist":        "should not appear",
+				}},
+			},
+			want: map[string]string{
+				"duration":              "12.5",
+				"liq_cue_in":            "0.100",
+				"liq_cue_out":           "12.000",
+				"liq_cross_start_next":  "11.500",
+				"replaygain_track_gain": "-3.200",
+			},
+		},
+		{
+			name: "stream tags overlay format tags and empty stream duration keeps format duration",
+			probed: probePayload{
+				Streams: []probeStream{{CodecType: "audio", Tags: map[string]string{"liq_cue_in": "1.000", "liq_loudness": "-14.000 LUFS"}}},
+				Format:  probeFormat{Duration: "99.0", Tags: map[string]string{"liq_cue_in": "0.000", "liq_cue_out": "98.0"}},
+			},
+			want: map[string]string{
+				"duration":     "99.0",
+				"liq_cue_in":   "1.000",
+				"liq_cue_out":  "98.0",
+				"liq_loudness": "-14.000",
+			},
+		},
+		{
+			name: "non-audio streams are ignored",
+			probed: probePayload{
+				Streams: []probeStream{
+					{CodecType: "video", Duration: "1.0", Tags: map[string]string{"liq_cue_in": "9.9"}},
+					{CodecType: "audio", Duration: "5.0", Tags: map[string]string{"liq_cue_in": "0.2"}},
+				},
+				Format: probeFormat{Duration: "5.0", Tags: map[string]string{}},
+			},
+			want: map[string]string{"duration": "5.0", "liq_cue_in": "0.2"},
+		},
+	}
 
-	s.Run("format tags alone enable cache fields", func() {
-		raw := []byte(`{
-			"streams":[{"codec_type":"audio","duration":"12.5","tags":{}}],
-			"format":{
-				"duration":"12.345",
-				"tags":{
-					"liq_cue_in":"0.100",
-					"liq_cue_out":"12.000",
-					"liq_cross_start_next":"11.500",
-					"replaygain_track_gain":"-3.200 dB",
-					"ignored_artist":"should not appear"
-				}
-			}
-		}`)
-		tags, err := calc.tagsFromProbeJSON(raw)
-		s.NoError(err)
-		s.Equal("12.5", tags["duration"], "stream duration should win over format")
-		s.Equal("0.100", tags["liq_cue_in"])
-		s.Equal("12.000", tags["liq_cue_out"])
-		s.Equal("11.500", tags["liq_cross_start_next"])
-		s.Equal("-3.200", tags["replaygain_track_gain"], "unit suffix must be stripped")
-		_, hasArtist := tags["ignored_artist"]
-		s.False(hasArtist)
-	})
-
-	s.Run("stream tags overlay format tags", func() {
-		raw := []byte(`{
-			"streams":[{
-				"codec_type":"audio",
-				"duration":"",
-				"tags":{"liq_cue_in":"1.000","liq_loudness":"-14.000 LUFS"}
-			}],
-			"format":{
-				"duration":"99.0",
-				"tags":{"liq_cue_in":"0.000","liq_cue_out":"98.0"}
-			}
-		}`)
-		tags, err := calc.tagsFromProbeJSON(raw)
-		s.NoError(err)
-		s.Equal("99.0", tags["duration"], "format duration used when stream duration empty")
-		s.Equal("1.000", tags["liq_cue_in"], "stream tag should override format")
-		s.Equal("98.0", tags["liq_cue_out"])
-		s.Equal("-14.000", tags["liq_loudness"])
-	})
-
-	s.Run("non-audio streams are ignored", func() {
-		raw := []byte(`{
-			"streams":[
-				{"codec_type":"video","duration":"1.0","tags":{"liq_cue_in":"9.9"}},
-				{"codec_type":"audio","duration":"5.0","tags":{"liq_cue_in":"0.2"}}
-			],
-			"format":{"duration":"5.0","tags":{}}
-		}`)
-		tags, err := calc.tagsFromProbeJSON(raw)
-		s.NoError(err)
-		s.Equal("0.2", tags["liq_cue_in"])
-		s.Equal("5.0", tags["duration"])
-	})
+	for _, tc := range tests {
+		s.Run(tc.name, func() {
+			s.Equal(tc.want, NewCalculator(nil).tagsFromProbe(tc.probed))
+		})
+	}
 }
 
 // TestApplyProbeDuration covers the post-scan duration override.
