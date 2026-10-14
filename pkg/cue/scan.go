@@ -1,90 +1,25 @@
 package cue
 
 import (
-	"bufio"
-	"bytes"
-	"context"
 	"fmt"
-	"io"
 	"math"
-	"os/exec"
-	"strconv"
-	"strings"
 )
 
-const (
-	// initial capacity for the parsed frames slice. ebur128 emits one frame
-	// every 100ms, so 4096 covers ~6.8 minutes without a reallocation; longer
-	// tracks just grow normally. At 16 bytes/frame this is ~64KB up front.
-	initialFrameCapacity = 4096
-	// how much of a failing ffmpeg's stderr to keep for the error message
-	maxStderrCapture = 4 << 10
-)
-
-// byte-slice prefixes used while scanning ffmpeg's ametadata output. Kept as
-// package-level []byte so parseFFmpegOutput can match on scanner.Bytes() without
-// allocating a string per line.
-var (
-	framePrefix     = []byte("frame:")
-	ptsTimePrefix   = []byte("pts_time:")
-	mPrefix         = []byte("lavfi.r128.M=")
-	iPrefix         = []byte("lavfi.r128.I=")
-	truePeaksPrefix = []byte("lavfi.r128.true_peaks_ch")
-	lraPrefix       = []byte("lavfi.r128.LRA=")
-)
-
-// scan runs a full ffmpeg ebur128 analysis of the file and derives all cueing
-// and loudness values from the per-frame momentary loudness measurements.
+// scan runs a full ebur128 analysis of the file through libav and derives all
+// cueing and loudness values from the per-frame momentary loudness
+// measurements.
 func (c *Calculator) scan(filename string) (*Result, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), c.executionTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, ffmpeg,
-		"-v", "error",
-		"-nostdin",
-		"-y",
-		"-i", filename,
-		"-vn",
-		"-af",
-		fmt.Sprintf("ebur128=target=%.3f:peak=true:metadata=1,ametadata=mode=print:file=-", c.targetLoudness),
-		"-f", "null",
-		"null",
-	)
-	var stderr cappedBuffer
-	cmd.Stderr = &stderr
-	filterOutput, err := cmd.StdoutPipe()
+	filters := fmt.Sprintf("ebur128=target=%.3f:peak=true:metadata=1", c.targetLoudness)
+	measured, err := scanFile(filename, filters, c.executionTimeout)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("analysis failed for %q: %w", filename, err)
 	}
-	defer func() { _ = filterOutput.Close() }()
-
-	if err = cmd.Start(); err != nil {
-		return nil, err
-	}
-	frames, loudness, lastTPLR, err := c.parseFFmpegOutput(filterOutput)
-	if err != nil {
-		// a scanner failure (e.g. an over-long line) leaves the pipe undrained,
-		// where ffmpeg would block writing to it until the deadline; kill it
-		// first, then reap and surface the error
-		cancel()
-		_ = cmd.Wait()
-		return nil, fmt.Errorf("failed to read ffmpeg output for %q: %w", filename, err)
-	}
-	// the pipe is fully drained above; reap the process and surface any failure
-	// instead of leaking it and silently using partial output
-	if err := cmd.Wait(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return nil, fmt.Errorf("ffmpeg analysis timed out after %s for %q", c.executionTimeout, filename)
-		}
-		if detail := strings.TrimSpace(stderr.String()); detail != "" {
-			return nil, fmt.Errorf("ffmpeg analysis failed for %q: %w: %s", filename, err, detail)
-		}
-		return nil, fmt.Errorf("ffmpeg analysis failed for %q: %w", filename, err)
-	}
+	frames, loudness := measured.frames, measured.integrated
 	if len(frames) == 0 {
-		return nil, fmt.Errorf("no audio frames produced by ffmpeg for %q", filename)
+		return nil, fmt.Errorf("no audio frames produced for %q", filename)
 	}
 
-	truePeak, truePeakDb, loudnessRange := parseTruePeakAndRange(lastTPLR)
+	truePeakDb := toDBFS(measured.truePeak)
 
 	// Coarse duration from the last analysed frame (ebur128 steps ~100ms).
 	// Calc overrides this with the precise probe duration when available.
@@ -221,43 +156,24 @@ func (c *Calculator) scan(filename string) (*Result, error) {
 		LongTail:          longtail,
 		SustainedEnding:   sustained,
 		Loudness:          loudness,
-		LoudnessRange:     loudnessRange,
+		LoudnessRange:     measured.loudnessRange,
 		Amplify:           amplify,
 		AmplifyAdjustment: amplifyCorrection,
 		ReferenceLoudness: c.targetLoudness,
 		BlankSkip:         c.blankSkip,
 		BlankSkipped:      blankSkipped,
 		Duration:          duration,
-		TruePeak:          truePeak,
+		TruePeak:          measured.truePeak,
 		TruePeakDb:        truePeakDb,
 	}, nil
 }
 
-// parseTruePeakAndRange extracts the maximum true peak (linear and dBFS) and the
-// loudness range from the final frame's true-peak/LRA metadata line(s).
-func parseTruePeakAndRange(tplr string) (truePeak, truePeakDb, loudnessRange float64) {
-	for _, val := range strings.Split(tplr, ";") {
-		switch {
-		case strings.HasPrefix(val, "lavfi.r128.true_peaks_ch"):
-			if _, after, ok := strings.Cut(val, "="); ok {
-				if v, err := strconv.ParseFloat(after, 64); err == nil {
-					truePeak = max(truePeak, v)
-				}
-			}
-		case strings.HasPrefix(val, "lavfi.r128.LRA="):
-			if _, after, ok := strings.Cut(val, "="); ok {
-				if v, err := strconv.ParseFloat(after, 64); err == nil {
-					loudnessRange = v
-				}
-			}
-		}
-	}
+// toDBFS converts a linear true peak to dBFS; no peak is negative infinity.
+func toDBFS(truePeak float64) float64 {
 	if truePeak > 0 {
-		truePeakDb = 20 * math.Log10(truePeak)
-	} else {
-		truePeakDb = math.Inf(-1)
+		return 20 * math.Log10(truePeak)
 	}
-	return
+	return math.Inf(-1)
 }
 
 // calcEnding splits elements into two equal halves (dropping the midpoint for an
@@ -296,71 +212,6 @@ func calcEnding(elements []Frame) (lufsRatioPct, endLufs float64) {
 	return lufsRatioPct, y2
 }
 
-// parseFFmpegOutput parses the ffmpeg ametadata stream into per-frame momentary
-// loudness measurements. Integrated loudness and the true-peak/LRA line are only
-// ever consumed for the final frame, so rather than storing them on every frame
-// they are tracked separately and returned: lastIntegrated holds the most recent
-// integrated loudness ("I") and lastTPLR the most recent true-peak/LRA line(s),
-// both belonging to the last frame seen.
-func (c *Calculator) parseFFmpegOutput(reader io.Reader) (frames []Frame, lastIntegrated float64, lastTPLR string, err error) {
-	frames = make([]Frame, 0, initialFrameCapacity)
-
-	scanner := bufio.NewScanner(reader)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-
-		if bytes.HasPrefix(line, framePrefix) {
-			if idx := bytes.Index(line, ptsTimePrefix); idx != -1 {
-				tok := firstField(line[idx+len(ptsTimePrefix):])
-				if pts, err := strconv.ParseFloat(string(tok), 64); err == nil {
-					// a frame whose M line never arrives must not read as
-					// full scale, so start it at silence
-					frames = append(frames, Frame{PTSTime: pts, Loudness: math.Inf(-1)})
-					// reset the "last frame" accumulators for the new frame so
-					// they end up holding only the final frame's values
-					lastIntegrated = 0
-					lastTPLR = ""
-				}
-			}
-			continue
-		}
-
-		// data lines belong to the most recent frame; ignore any before one
-		if len(frames) == 0 {
-			continue
-		}
-
-		switch {
-		case bytes.HasPrefix(line, mPrefix):
-			if v, err := strconv.ParseFloat(string(line[len(mPrefix):]), 64); err == nil {
-				// ffmpeg reports "nan" on very silent parts of some files;
-				// upstream maps those to -inf so they compare as silence
-				if math.IsNaN(v) {
-					v = math.Inf(-1)
-				}
-				frames[len(frames)-1].Loudness = v
-			}
-		case bytes.HasPrefix(line, iPrefix):
-			if v, err := strconv.ParseFloat(string(line[len(iPrefix):]), 64); err == nil {
-				lastIntegrated = v
-			}
-		case bytes.HasPrefix(line, truePeaksPrefix), bytes.HasPrefix(line, lraPrefix):
-			if lastTPLR == "" {
-				lastTPLR = string(line)
-			} else {
-				lastTPLR += ";" + string(line)
-			}
-		}
-	}
-
-	// surface read errors (e.g. bufio.ErrTooLong on an over-long line) so the
-	// caller doesn't silently proceed on a truncated frame list
-	if err := scanner.Err(); err != nil {
-		return frames, lastIntegrated, lastTPLR, err
-	}
-	return frames, lastIntegrated, lastTPLR, nil
-}
-
 // firstIndexAboveFromEnd scans frames[start:end] backwards and returns the index
 // and PTS time of the first frame whose momentary loudness exceeds level. If no
 // such frame exists it returns idx == -1. Used for cue-out and the three
@@ -373,38 +224,3 @@ func firstIndexAboveFromEnd(frames []Frame, start, end int, level float64) (idx 
 	}
 	return -1, 0
 }
-
-// firstField returns the first whitespace-delimited token of b, skipping any
-// leading spaces/tabs, without allocating (mirrors strings.Fields(...)[0]).
-func firstField(b []byte) []byte {
-	i := 0
-	for i < len(b) && (b[i] == ' ' || b[i] == '\t') {
-		i++
-	}
-	b = b[i:]
-	for j := 0; j < len(b); j++ {
-		if b[j] == ' ' || b[j] == '\t' {
-			return b[:j]
-		}
-	}
-	return b
-}
-
-// cappedBuffer keeps at most maxStderrCapture bytes of what is written to it
-// and discards the rest, so a failing ffmpeg can be quoted in an error without
-// buffering its entire log.
-type cappedBuffer struct {
-	buf bytes.Buffer
-}
-
-func (w *cappedBuffer) Write(p []byte) (int, error) {
-	if room := maxStderrCapture - w.buf.Len(); room > 0 {
-		if len(p) > room {
-			p = p[:room]
-		}
-		_, _ = w.buf.Write(p)
-	}
-	return len(p), nil
-}
-
-func (w *cappedBuffer) String() string { return w.buf.String() }

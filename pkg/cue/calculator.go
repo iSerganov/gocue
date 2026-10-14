@@ -12,8 +12,6 @@ import (
 )
 
 const (
-	// location of the ffmpeg binary
-	ffmpeg = "ffmpeg"
 	// Reference Loudness Target
 	defaultTargetLUFS = -18.0
 	// LU below average track loudness for cue-in/cue-out trigger ("silence");
@@ -110,7 +108,7 @@ type CalculatorOptions struct {
 // A nil opts yields a calculator with every parameter at its default. When opts
 // is non-nil its values are used verbatim, with one guard: a non-positive
 // ExecutionTimeout is replaced by the default. A zero timeout would make the
-// analysis context expire immediately and kill ffprobe/ffmpeg on every call,
+// probe and the scan give up immediately on every call,
 // and unlike the loudness parameters (where 0.0 is a legal in-range value) a
 // zero/negative timeout is never a meaningful choice.
 func NewCalculator(opts *CalculatorOptions) *Calculator {
@@ -179,7 +177,7 @@ func (c *Calculator) diagf(format string, args ...any) {
 }
 
 // Calc returns cue/loudness results for pathToFile. It prefers existing tags
-// when doPreAnalysis succeeds; otherwise it runs a full ffmpeg scan. Only
+// when doPreAnalysis succeeds; otherwise it runs a full ebur128 scan. Only
 // ErrRequireAnalysis triggers a scan — other pre-analysis errors propagate.
 // After a scan, Duration is overridden with the precise probe value when
 // available (frame-derived duration is a coarse fallback).
