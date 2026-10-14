@@ -6,7 +6,7 @@ let settings.gocue.version =
   settings.make(
     description=
       "Software version of this gocue script.",
-    "1.2.0"
+    "1.3.0"
   )
 
 let settings.gocue.path =

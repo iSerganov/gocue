@@ -1,7 +1,7 @@
 package cue
 
 /*
-#cgo pkg-config: libavformat libavutil
+#cgo pkg-config: libavformat libavcodec libavfilter libavutil
 #include <stdlib.h>
 #include <libavutil/avutil.h>
 #include <libavutil/error.h>
@@ -12,6 +12,8 @@ import "C"
 import (
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
 	"time"
 	"unsafe"
 )
@@ -29,18 +31,87 @@ func openInput(path string, timeout time.Duration) (*C.gocue_input, error) {
 	var code C.int
 	in := C.gocue_open_input(cPath, C.int64_t(timeout.Microseconds()), &code)
 	if in == nil {
-		if code == C.AVERROR_EXIT {
-			return nil, fmt.Errorf("timed out after %s", timeout)
-		}
-		return nil, avError(code)
+		return nil, avError(code, timeout)
 	}
 	return in, nil
 }
 
-func avError(code C.int) error {
+func avError(code C.int, timeout time.Duration) error {
+	if code == C.AVERROR_EXIT {
+		return fmt.Errorf("timed out after %s", timeout)
+	}
 	buf := make([]byte, C.AV_ERROR_MAX_STRING_SIZE)
 	C.av_strerror(code, (*C.char)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
 	return errors.New(C.GoString((*C.char)(unsafe.Pointer(&buf[0]))))
+}
+
+// ebur128Output is what the ebur128 filter reported: every frame's momentary
+// loudness, and the totals carried by the last frame.
+type ebur128Output struct {
+	frames        []Frame
+	integrated    float64
+	truePeak      float64
+	loudnessRange float64
+}
+
+// scanFile decodes the best audio stream of path through filters.
+func scanFile(path, filters string, timeout time.Duration) (ebur128Output, error) {
+	cPath, cFilters := C.CString(path), C.CString(filters)
+	defer C.free(unsafe.Pointer(cPath))
+	defer C.free(unsafe.Pointer(cFilters))
+	var code C.int
+	res := C.gocue_scan(cPath, cFilters, C.int64_t(timeout.Microseconds()), &code)
+	if res == nil {
+		return ebur128Output{}, avError(code, timeout)
+	}
+	defer C.gocue_scan_free(res)
+
+	n := int(res.n)
+	pts := unsafe.Slice((*int64)(unsafe.Pointer(res.pts)), n)
+	momentary := unsafe.Slice((*float64)(unsafe.Pointer(res.momentary)), n)
+	return ebur128Output{
+		frames:        newFrames(pts, momentary, int64(res.time_base.num), int64(res.time_base.den)),
+		integrated:    float64(res.integrated),
+		truePeak:      float64(res.true_peak),
+		loudnessRange: float64(res.loudness_range),
+	}, nil
+}
+
+// seconds converts ts, counted in units of tbNum/tbDen, the way av_q2d(tb) * ts
+// does, so the result matches the strings ffmpeg and ffprobe print.
+func seconds(ts, tbNum, tbDen int64) float64 {
+	return float64(tbNum) / float64(tbDen) * float64(ts)
+}
+
+// newFrames pairs each frame's time with its momentary loudness. NaN marks a
+// frame whose M value was "nan" or missing.
+func newFrames(pts []int64, momentary []float64, tbNum, tbDen int64) []Frame {
+	frames := make([]Frame, len(pts))
+	for i := range pts {
+		m := momentary[i]
+		// ffmpeg reports "nan" on very silent parts of some files;
+		// upstream maps those to -inf so they compare as silence
+		if math.IsNaN(m) {
+			m = math.Inf(-1)
+		}
+		frames[i] = Frame{PTSTime: tsTime(pts[i], tbNum, tbDen), Loudness: m}
+	}
+	return frames
+}
+
+// tsTime returns ts in seconds as FFmpeg 9's av_ts2timestr prints it, six
+// decimals or more below one second, parsed back. ametadata=print used that
+// string, and so does upstream, so cue times keep their exact values.
+func tsTime(ts, tbNum, tbDen int64) float64 {
+	val := seconds(ts, tbNum, tbDen)
+	precision := 6
+	if val != 0 {
+		if l := math.Floor(math.Log10(math.Abs(val))); l < 0 {
+			precision = int(-l) + 5
+		}
+	}
+	v, _ := strconv.ParseFloat(strconv.FormatFloat(val, 'f', precision, 64), 64)
+	return v
 }
 
 // probeFile reads the container and stream durations and tags that
@@ -67,13 +138,13 @@ func probeFile(path string, timeout time.Duration) (probePayload, error) {
 	return probed, nil
 }
 
-// ffprobeTime formats ts, counted in units of tb, the way ffprobe prints a
-// time: the same multiplication by av_q2d(tb) and "%f", so the strings match.
+// ffprobeTime formats ts, counted in units of tb, with "%f" as ffprobe prints
+// a time.
 func ffprobeTime(ts C.int64_t, tb C.AVRational) string {
 	if ts == C.AV_NOPTS_VALUE {
 		return ""
 	}
-	return fmt.Sprintf("%f", float64(ts)*(float64(tb.num)/float64(tb.den)))
+	return fmt.Sprintf("%f", seconds(int64(ts), int64(tb.num), int64(tb.den)))
 }
 
 func dictToMap(d *C.AVDictionary) map[string]string {

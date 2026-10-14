@@ -114,7 +114,7 @@ cleanup.
 - Lint your changes before considering them done.
 
 This repo has no `.golangci.yml`, so `golangci-lint run` uses the default linter
-set. CI pins v2.11.4 through `golangci/golangci-lint-action` in
+set. CI pins v2.14.0 through `golangci/golangci-lint-action` in
 [.github/workflows/ci.yml](.github/workflows/ci.yml). Use a v2.x binary locally
 so results match, and re-pin here if that version changes.
 
@@ -147,8 +147,9 @@ go test ./pkg/cue -run TestCalculatorSuite/TestScanRegression -v
 ```
 
 `pkg/cue` links FFmpeg 9.0.1's libraries through cgo, found with `pkg-config`
-(Homebrew's `ffmpeg` and `pkg-config` locally). `ffmpeg` and `ffprobe` must
-also be on `PATH` for almost every test in `pkg/cue`. On Linux, link with
+(Homebrew's `ffmpeg` and `pkg-config` locally). gocue itself starts no
+processes, but tests still need `ffmpeg` and `ffprobe` on `PATH` to prepare
+tagged copies, and the integration harness calls `ffprobe`. On Linux, link with
 `-Wl,--disable-new-dtags` as the CI action does, or libavformat cannot find
 libavcodec at run time. Integration tests additionally need `liquidsoap` 2.3.0+ and build their own
 binary into `integration/.bin/`. Check `liquidsoap --version` before assuming an
@@ -164,8 +165,8 @@ all three green.
 |------|------|
 | [cmd/cue/cue.go](cmd/cue/cue.go) | Cobra CLI, flag ranges, JSON printing |
 | [pkg/cue/calculator.go](pkg/cue/calculator.go) | Tag probe, cached fast path, gain math |
-| [pkg/cue/libav.go](pkg/cue/libav.go) | cgo bindings: opens files with libav and reads durations and tags as ffprobe would |
-| [pkg/cue/scan.go](pkg/cue/scan.go) | Full ffmpeg ebur128 scan and all cue/overlay math |
+| [pkg/cue/libav.go](pkg/cue/libav.go), [libav.c](pkg/cue/libav.c) | cgo layer: reads durations and tags as ffprobe would, and runs the ebur128 graph as the ffmpeg CLI did |
+| [pkg/cue/scan.go](pkg/cue/scan.go) | Full ebur128 scan and all cue/overlay math |
 | [pkg/cue/result.go](pkg/cue/result.go) | Numeric `Result`, unit suffixes applied only at marshal time |
 | [pkg/cue/frame.go](pkg/cue/frame.go) | One ebur128 frame (PTS + momentary loudness) |
 | [pkg/cue/error.go](pkg/cue/error.go) | `ErrRequireAnalysis`, the "cache is unusable" signal |
@@ -177,7 +178,7 @@ all three green.
   sufficient, `populate` fills gaps, `adjustLoudness` derives values, `parseTags`
   builds the `Result`. No audio is decoded.
 - **Scan path.** `doPreAnalysis` returns `ErrRequireAnalysis`, `scan` runs
-  ffmpeg, then `applyProbeDuration` replaces the coarse frame-derived duration
+  the ebur128 graph through libav, then `applyProbeDuration` replaces the coarse frame-derived duration
   with the precise container duration.
 
 Only `ErrRequireAnalysis` may trigger a scan. Any other probe error is fatal and
@@ -240,8 +241,13 @@ are pinned in `TestScanRegression`. If that test moves, the port has drifted.
 - A frame with no usable momentary loudness is recorded as negative infinity,
   never zero, so it compares as silence. ffmpeg emits `M=nan` on very silent
   parts of some files and upstream maps it the same way.
+- The scan reproduces what `ametadata=print` showed upstream, not what the
+  graph produces. `record` in `libav.c` drops frames without metadata (the
+  final chunk under 100 ms), and `tsTime` turns each PTS into the decimal
+  `av_ts2timestr` printed before parsing it back. Without either, frame counts
+  or JSON times such as `112.39999999999999` drift from upstream.
 - The library default execution timeout is 10s, the CLI default is 20s, and
-  `gocue.liq` passes 60s. One timeout covers both the probe and the ffmpeg scan, and it
+  `gocue.liq` passes 60s. One timeout covers both the probe and the scan, and it
   does not scale with file length, so a long file on slow hardware needs a
   larger `-e`.
 - `--nice` means pretty-print JSON here. In Python it means run under `nice(1)`.

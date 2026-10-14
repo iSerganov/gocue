@@ -2,20 +2,20 @@
 
 [![CI](https://github.com/iSerganov/gocue/actions/workflows/ci.yml/badge.svg)](https://github.com/iSerganov/gocue/actions/workflows/ci.yml)
 [![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/iSerganov/gocue/badges/coverage.json)](https://github.com/iSerganov/gocue/actions/workflows/ci.yml)
-[![Go Version](https://img.shields.io/badge/Go-1.26+-blue.svg)](https://golang.org/)
+[![Go Version](https://img.shields.io/badge/Go-1.27+-blue.svg)](https://golang.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-1.2.0-blue.svg)](Makefile)
+[![Version](https://img.shields.io/badge/Version-1.3.0-blue.svg)](Makefile)
 
 **gocue** is a Go audio analysis tool for professional playout workflows. It detects cue-in, cue-out, and overlay points and measures EBU R128 loudness, then prints JSON on stdout for Liquidsoap’s `autocue:` protocol.
 
-gocue is a stand-alone analyzer: it **reads** existing `liq_*` / ReplayGain tags when they are complete (to skip a full ffmpeg scan) and **does not write** tags back to files. Tag write-back, fades, and playlist wiring belong in a Liquidsoap `.liq` script. This repository ships a ready-to-use one — [`integration/scripts/gocue.liq`](integration/scripts/gocue.liq), documented under [Liquidsoap script (`gocue.liq`)](#liquidsoap-script-gocueliq) — adapted from [Moonbase59’s autocue](https://github.com/Moonbase59/autocue/blob/master/autocue.cue_file.liq); it is also published standalone as [autocue.gocue.liq](https://github.com/iSerganov/autocue/blob/master/autocue.gocue.liq). See the [Liquidsoap autocue docs](https://www.liquidsoap.info/doc-dev/settings.html#all-available-autocue-implementations) for details.
+gocue is a stand-alone analyzer: it **reads** existing `liq_*` / ReplayGain tags when they are complete (to skip a full loudness scan) and **does not write** tags back to files. Tag write-back, fades, and playlist wiring belong in a Liquidsoap `.liq` script. This repository ships a ready-to-use one — [`integration/scripts/gocue.liq`](integration/scripts/gocue.liq), documented under [Liquidsoap script (`gocue.liq`)](#liquidsoap-script-gocueliq) — adapted from [Moonbase59’s autocue](https://github.com/Moonbase59/autocue/blob/master/autocue.cue_file.liq); it is also published standalone as [autocue.gocue.liq](https://github.com/iSerganov/autocue/blob/master/autocue.gocue.liq). See the [Liquidsoap autocue docs](https://www.liquidsoap.info/doc-dev/settings.html#all-available-autocue-implementations) for details.
 
 For algorithm background, see [Moonbase59’s autocue presentation](https://moonbase59.github.io/autocue/presentation/autocue.html).
 
 ## Features
 
 - **Audio analysis** — cue-in / cue-out and crossfade overlay points
-- **EBU R128** — integrated loudness, loudness range, and true peak via ffmpeg
+- **EBU R128** — integrated loudness, loudness range, and true peak from FFmpeg's `ebur128` filter, run in-process through libav
 - **Tag cache (read-only)** — reuses existing file tags when complete; recomputes amplify for a new target LUFS without re-decoding
 - **Formats** — WAV, OGG, MP3, FLAC, M4A, WMA, ASF, AIFF, and more (anything FFmpeg supports)
 - **Liquidsoap-oriented JSON** — unit-suffixed loudness/gain fields matching the autocue protocol
@@ -25,9 +25,8 @@ For algorithm background, see [Moonbase59’s autocue presentation](https://moon
 
 ### Prerequisites
 
-- Go 1.26 or higher and a C compiler (gocue uses cgo)
-- FFmpeg's shared libraries and headers, found through `pkg-config` (`libavformat`, `libavutil`). FFmpeg 9.0.1 is the tested version. On macOS, `brew install ffmpeg pkg-config` is enough. On Linux, distribution packages are usually older, so a shared build such as [BtbN's](https://github.com/BtbN/FFmpeg-Builds) with `PKG_CONFIG_PATH` pointing at its `lib/pkgconfig` works; link with `CGO_LDFLAGS="-Wl,-rpath,<dir>/lib -Wl,--disable-new-dtags"` so the binary finds the libraries at run time.
-- `ffmpeg` on `PATH` for the loudness scan
+- Go 1.27 or higher and a C compiler (gocue uses cgo)
+- FFmpeg's shared libraries and headers, found through `pkg-config` (`libavformat`, `libavcodec`, `libavfilter`, `libavutil`). FFmpeg 9.0.1 is the tested version. On macOS, `brew install ffmpeg pkg-config` is enough. On Linux, distribution packages are usually older, so a shared build such as [BtbN's](https://github.com/BtbN/FFmpeg-Builds) with `PKG_CONFIG_PATH` pointing at its `lib/pkgconfig` works; link with `CGO_LDFLAGS="-Wl,-rpath,<dir>/lib -Wl,--disable-new-dtags"` so the binary finds the libraries at run time.
 - An audio file to analyze
 
 ### Installation
@@ -75,7 +74,7 @@ go install github.com/iSerganov/gocue@latest
 | `--noclip` | `-k` | `false` | Lower gain if needed so true peak stays at or below −1 dBFS |
 | `--nice` | `-n` | `false` | Pretty-print JSON |
 | `--blankskip` | `-b` | `0.0` | Early cue-out on in-track silence longer than this many seconds (`0` = off) |
-| `--exec_timeout` | `-e` | `20s` | Timeout for the tag probe and the ffmpeg scan |
+| `--exec_timeout` | `-e` | `20s` | Timeout for the tag probe and the loudness scan |
 | `--print_flags` | `-p` | `false` | Log flag values to **stderr** (stdout stays JSON-only) |
 
 ### Parameter ranges
@@ -357,17 +356,31 @@ done
 | Piece | Role |
 |-------|------|
 | `cmd/cue` | Cobra CLI: flags, validation, JSON on stdout |
-| `pkg/cue.Calculator` | libav tag probe (cgo) + ffmpeg ebur128 scan |
+| `pkg/cue.Calculator` | Tag probe and `ebur128` scan through libav (cgo) |
 | `pkg/cue.Result` | Numeric result; unit suffixes only at JSON/YAML marshal |
 | `pkg/cue.Frame` | Per-frame momentary loudness (~100 ms) |
 
-**Dependencies:** FFmpeg libraries through cgo and the `ffmpeg` binary (external), [Cobra](https://github.com/spf13/cobra), [yaml.v3](https://github.com/go-yaml/yaml) (library marshal helper).
+**Dependencies:** FFmpeg libraries through cgo (external), [Cobra](https://github.com/spf13/cobra), [yaml.v3](https://github.com/go-yaml/yaml) (library marshal helper).
 
 **Performance notes:**
 
-- Streams ffmpeg stdout; does not load the whole audio file into Go memory
+- Decodes and measures the file in-process, one packet at a time, without starting ffmpeg or ffprobe and without holding the whole file in memory
 - Reuses complete tags from the file when possible (read-only cache)
 - Configurable `--exec_timeout` for probe/scan
+
+**1.3.0 against 1.2.0**, on the three longest test files (748–948 s of Ogg Vorbis), Apple M4 Max, FFmpeg 9.0.1. Go figures are medians of 10 `make bench` samples. Command wall times are medians of 10 hyperfine runs. These time and memory changes are significant at p < 0.01 by benchstat. CPU and kernel time are hyperfine means; peak RSS is one `/usr/bin/time -l` run per file.
+
+| Measure | 1.2.0 | 1.3.0 | Change |
+|---|---|---|---|
+| Tag probe, the whole cost of the cached path | 22.8–23.0 ms | 0.21–0.33 ms | 70× to 109× faster |
+| Full analysis (`Calc`) | 2.730–3.370 s | 2.616–3.307 s | 1.9% to 4.3% faster |
+| `gocue` command, wall time | 2.687–3.377 s | 2.657–3.357 s | 0.6% to 1.2% faster |
+| `gocue` command, CPU time (user + sys) | 3.16–3.98 s | 2.65–3.35 s | 16% less |
+| `gocue` command, kernel (sys) time | 0.24–0.30 s | 0.02–0.03 s | 91% less |
+| Go memory allocated per analysis | 1.69–2.20 MiB | 0.23–0.29 MiB | 86% less |
+| Peak RSS | 24.7–25.1 MiB, most likely the ffmpeg child | 28.1–29.0 MiB | one process instead of two |
+
+Wall time barely moves because decoding and the `ebur128` measurement are the same libav code in both versions, and they dominate a long file. What 1.3.0 removes is the second process, the pipe, and printing and parsing every frame as text. That shows up as CPU time rather than wall time, because in 1.2.0 ffmpeg and gocue's parser ran side by side on two cores. Short files gain more: the full scan of the 113 s `sample.ogg` is 10% faster.
 
 ## Testing
 
@@ -381,7 +394,7 @@ go test -tags=integration ./integration/ -count=1 -timeout 10m
 # or: make test-integration
 ```
 
-Requires FFmpeg 9.0.1: the libraries through `pkg-config` for the build, and `ffmpeg` / `ffprobe` on `PATH` for the scan and for preparing tagged test files. CI installs that version through [`.github/actions/setup-ffmpeg`](.github/actions/setup-ffmpeg/action.yml) and fails if a different one is found. Integration tests also need `liquidsoap` and use fixtures under `integration/testdata/` with scripts in `integration/scripts/`.
+Requires FFmpeg 9.0.1: the libraries through `pkg-config` for the build, and `ffmpeg` / `ffprobe` on `PATH` for preparing tagged test files and for the integration harness. CI installs that version through [`.github/actions/setup-ffmpeg`](.github/actions/setup-ffmpeg/action.yml) and fails if a different one is found. Integration tests also need `liquidsoap` and use fixtures under `integration/testdata/` with scripts in `integration/scripts/`.
 
 ## Project structure
 

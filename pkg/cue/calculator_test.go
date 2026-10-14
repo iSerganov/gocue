@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -49,7 +48,13 @@ func (s *CalculatorSuite) TestProbe() {
 	}
 }
 
-func (s *CalculatorSuite) TestProbeErrors() {
+// TestLibavErrors checks that a failing probe or scan says why, in libav's
+// words, rather than just failing.
+func (s *CalculatorSuite) TestLibavErrors() {
+	operations := map[string]func(*Calculator, string) error{
+		"probe": func(c *Calculator, f string) error { _, err := c.probe(f); return err },
+		"scan":  func(c *Calculator, f string) error { _, err := c.scan(f); return err },
+	}
 	tests := []struct {
 		name    string
 		file    string
@@ -61,15 +66,17 @@ func (s *CalculatorSuite) TestProbeErrors() {
 		{name: "expired deadline reports a timeout", file: "test_data/tch_big.ogg", timeout: time.Nanosecond, wantErr: "timed out after 1ns"},
 	}
 
-	for _, tc := range tests {
-		s.Run(tc.name, func() {
-			calc := &Calculator{executionTimeout: tc.timeout}
+	for op, run := range operations {
+		for _, tc := range tests {
+			s.Run(op+" "+tc.name, func() {
+				calc := NewCalculator(&CalculatorOptions{ExecutionTimeout: tc.timeout})
 
-			_, err := calc.probe(tc.file)
+				err := run(calc, tc.file)
 
-			s.Require().Error(err)
-			s.Contains(err.Error(), tc.wantErr)
-		})
+				s.Require().Error(err)
+				s.Contains(err.Error(), tc.wantErr)
+			})
+		}
 	}
 }
 
@@ -602,68 +609,51 @@ func (s *CalculatorSuite) TestCalcReusesTagsWithDerivedTrackGain() {
 	}
 }
 
-// TestParseFFmpegOutputMomentaryLoudness pins how a frame with no usable
-// momentary loudness is recorded. Upstream turns ffmpeg's "nan" into negative
-// infinity so the frame compares as silence; a NaN would fail every comparison
-// instead, hiding blanks and sustained endings.
-func (s *CalculatorSuite) TestParseFFmpegOutputMomentaryLoudness() {
+// TestNewFramesMomentaryLoudness pins how a frame with no usable momentary
+// loudness is recorded. Upstream turns ffmpeg's "nan" into negative infinity
+// so the frame compares as silence; a NaN would fail every comparison instead,
+// hiding blanks and sustained endings. libav reports a "nan" or missing M
+// value as NaN.
+func (s *CalculatorSuite) TestNewFramesMomentaryLoudness() {
 	tests := []struct {
-		name  string
-		input string
-		want  float64
+		name      string
+		momentary float64
+		want      float64
 	}{
-		{
-			name:  "numeric momentary loudness is kept",
-			input: "frame:0 pts_time:0.0\nlavfi.r128.M=-23.500\n",
-			want:  -23.5,
-		},
-		{
-			name:  "nan momentary loudness counts as silence",
-			input: "frame:0 pts_time:0.0\nlavfi.r128.M=nan\n",
-			want:  math.Inf(-1),
-		},
-		{
-			name:  "negative infinity is kept",
-			input: "frame:0 pts_time:0.0\nlavfi.r128.M=-inf\n",
-			want:  math.Inf(-1),
-		},
-		{
-			name:  "frame without a momentary loudness line counts as silence",
-			input: "frame:0 pts_time:0.0\nlavfi.r128.I=-23.000\n",
-			want:  math.Inf(-1),
-		},
+		{name: "numeric momentary loudness is kept", momentary: -23.5, want: -23.5},
+		{name: "nan or missing momentary loudness counts as silence", momentary: math.NaN(), want: math.Inf(-1)},
+		{name: "negative infinity is kept", momentary: math.Inf(-1), want: math.Inf(-1)},
 	}
 
 	for _, tc := range tests {
 		s.Run(tc.name, func() {
-			frames, _, _, err := NewCalculator(nil).parseFFmpegOutput(strings.NewReader(tc.input))
+			frames := newFrames([]int64{0}, []float64{tc.momentary}, 1, 44100)
 
-			s.Require().NoError(err)
 			s.Require().Len(frames, 1)
 			s.Equal(tc.want, frames[0].Loudness)
 		})
 	}
 }
 
-// TestScanReportsFFmpegStderr checks that a failing ffmpeg is quoted in the
-// error, so a scan failure says more than its exit status.
-func (s *CalculatorSuite) TestScanReportsFFmpegStderr() {
+// TestTSTime pins frame times to the text ametadata=print showed with FFmpeg 9,
+// which upstream parses, so cue times keep their exact values.
+func (s *CalculatorSuite) TestTSTime() {
 	tests := []struct {
-		name string
-		file string
+		name  string
+		ts    int64
+		tbNum int64
+		tbDen int64
+		want  float64
 	}{
-		{name: "unreadable input reports why ffmpeg refused it", file: "calculator.go"},
-		{name: "missing input reports why ffmpeg refused it", file: "test_data/does_not_exist.wav"},
+		{name: "100ms grid lands on the printed decimal", ts: 4956840, tbNum: 1, tbDen: 44100, want: 112.4},
+		{name: "zero stays zero", ts: 0, tbNum: 1, tbDen: 44100, want: 0},
+		{name: "times above one second round to six decimals", ts: 4958, tbNum: 1, tbDen: 3, want: 1652.666667},
+		{name: "times below one second keep five digits after the leading zeros", ts: 1, tbNum: 1, tbDen: 44100, want: 0.0000226757},
 	}
 
 	for _, tc := range tests {
 		s.Run(tc.name, func() {
-			calc := NewCalculator(&CalculatorOptions{ExecutionTimeout: 10 * time.Second})
-
-			_, err := calc.scan(tc.file)
-
-			s.Require().Error(err)
-			s.Regexp(`exit status \d+: .+`, err.Error())
+			s.Equal(tc.want, tsTime(tc.ts, tc.tbNum, tc.tbDen))
 		})
 	}
 }
@@ -710,30 +700,5 @@ func BenchmarkScan(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-	}
-}
-
-func BenchmarkParseFFmpegOutput(b *testing.B) {
-	var sb strings.Builder
-	for i := 0; i < 600; i++ {
-		fmt.Fprintf(&sb, `frame:%d    pts:%d       pts_time:%.1f
-lavfi.r128.M=%.3f
-lavfi.r128.S=-22.800
-lavfi.r128.I=-23.200
-lavfi.r128.LRA=5.200
-lavfi.r128.LRA.low=-25.100
-lavfi.r128.LRA.high=-19.900
-lavfi.r128.true_peaks_ch0=0.123
-lavfi.r128.true_peaks_ch1=0.131
-`, i, i*4800, float64(i)/10, -23.5+float64(i%40)/4)
-	}
-	sampleData := sb.String()
-
-	calculator := &Calculator{}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		reader := strings.NewReader(sampleData)
-		_, _, _, _ = calculator.parseFFmpegOutput(reader)
 	}
 }

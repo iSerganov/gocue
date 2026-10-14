@@ -4,7 +4,7 @@
 # The build context is the repository root, not example/:
 #   docker build -f example/Dockerfile -t gocue-station ..
 
-FROM golang:1.26 AS build
+FROM golang:1.27 AS build
 
 # gocue links libav through cgo. Liquidsoap's image carries FFmpeg 7.1, so
 # gocue gets its own FFmpeg 9.0.1, the version the tests run against.
@@ -38,11 +38,9 @@ RUN PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig \
 
 FROM savonet/liquidsoap:v2.4.5
 
-# gocue loads these libraries through its rpath and still runs the ffmpeg
-# binary for the loudness scan. Liquidsoap keeps using its own FFmpeg 7.1.
+# gocue loads these libraries through its rpath. Liquidsoap keeps using its
+# own FFmpeg 7.1.
 COPY --from=build /opt/ffmpeg/lib /opt/ffmpeg/lib
-COPY --from=build /opt/ffmpeg/bin/ffmpeg /opt/ffmpeg/bin/ffmpeg
-ENV PATH=/opt/ffmpeg/bin:$PATH
 
 COPY --from=build /out/gocue /usr/local/bin/gocue
 
