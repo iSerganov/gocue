@@ -1,13 +1,10 @@
 package cue
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -17,8 +14,6 @@ import (
 const (
 	// location of the ffmpeg binary
 	ffmpeg = "ffmpeg"
-	// location of the ffprobe binary
-	ffprobe = "ffprobe"
 	// Reference Loudness Target
 	defaultTargetLUFS = -18.0
 	// LU below average track loudness for cue-in/cue-out trigger ("silence");
@@ -232,58 +227,37 @@ func applyProbeDuration(result *Result, tags map[string]string) {
 	result.Duration = dur
 }
 
-// probePayload is the typed shape of ffprobe -of json output we care about.
+// probePayload holds the durations and tags ffprobe would report for a file.
 // Format.Tags are essential for containers (FLAC, MP3, …) that store metadata
 // at the container level rather than on the audio stream.
 type probePayload struct {
-	Streams []probeStream `json:"streams"`
-	Format  probeFormat   `json:"format"`
+	Streams []probeStream
+	Format  probeFormat
 }
 
 type probeStream struct {
-	CodecType string            `json:"codec_type"`
-	Duration  string            `json:"duration"`
-	Tags      map[string]string `json:"tags"`
+	CodecType string
+	Duration  string
+	Tags      map[string]string
 }
 
 type probeFormat struct {
-	Duration string            `json:"duration"`
-	Tags     map[string]string `json:"tags"`
+	Duration string
+	Tags     map[string]string
 }
 
 func (c *Calculator) probe(pathToFile string) (map[string]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), c.executionTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, ffprobe,
-		"-v", "quiet",
-		"-show_entries",
-		"stream=codec_name,duration,bit_rate,sample_fmt,sample_rate,time_base,codec_type:stream_tags:format=duration:format_tags",
-		"-of", "json=compact=1",
-		pathToFile,
-	)
-	res, err := cmd.Output()
+	probed, err := probeFile(pathToFile, c.executionTimeout)
 	if err != nil {
-		return nil, fmt.Errorf("ffprobe failed for %q: %w", pathToFile, err)
-	}
-	tags, err := c.tagsFromProbeJSON(res)
-	if err != nil {
-		return nil, fmt.Errorf("cannot parse ffprobe output for %q: %w", pathToFile, err)
-	}
-	return tags, nil
-}
-
-// tagsFromProbeJSON decodes ffprobe JSON and merges format-level and
-// audio-stream tags. Format tags are applied first (container metadata), then
-// each audio stream overlays its own tags and duration so stream-specific
-// values win on conflict. Non-audio streams are ignored.
-func (c *Calculator) tagsFromProbeJSON(data []byte) (map[string]string, error) {
-	var probed probePayload
-	if err := json.Unmarshal(data, &probed); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("probe failed for %q: %w", pathToFile, err)
 	}
 	return c.tagsFromProbe(probed), nil
 }
 
+// tagsFromProbe merges format-level and audio-stream tags. Format tags are
+// applied first (container metadata), then each audio stream overlays its own
+// tags and duration so stream-specific values win on conflict. Non-audio
+// streams are ignored.
 func (c *Calculator) tagsFromProbe(probed probePayload) map[string]string {
 	tags := make(map[string]string)
 

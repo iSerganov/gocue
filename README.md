@@ -17,7 +17,7 @@ For algorithm background, see [Moonbase59’s autocue presentation](https://moon
 - **Audio analysis** — cue-in / cue-out and crossfade overlay points
 - **EBU R128** — integrated loudness, loudness range, and true peak via ffmpeg
 - **Tag cache (read-only)** — reuses existing file tags when complete; recomputes amplify for a new target LUFS without re-decoding
-- **Formats** — WAV, OGG, MP3, FLAC, M4A, WMA, ASF, AIFF, and more (anything ffmpeg/ffprobe support)
+- **Formats** — WAV, OGG, MP3, FLAC, M4A, WMA, ASF, AIFF, and more (anything FFmpeg supports)
 - **Liquidsoap-oriented JSON** — unit-suffixed loudness/gain fields matching the autocue protocol
 - **Configurable thresholds** — silence, overlay, longtail, blankskip, clipping prevention
 
@@ -25,8 +25,9 @@ For algorithm background, see [Moonbase59’s autocue presentation](https://moon
 
 ### Prerequisites
 
-- Go 1.26 or higher (to build from source)
-- FFmpeg and FFprobe on `PATH`
+- Go 1.26 or higher and a C compiler (gocue uses cgo)
+- FFmpeg's shared libraries and headers, found through `pkg-config` (`libavformat`, `libavutil`). FFmpeg 9.0.1 is the tested version. On macOS, `brew install ffmpeg pkg-config` is enough. On Linux, distribution packages are usually older, so a shared build such as [BtbN's](https://github.com/BtbN/FFmpeg-Builds) with `PKG_CONFIG_PATH` pointing at its `lib/pkgconfig` works; link with `CGO_LDFLAGS="-Wl,-rpath,<dir>/lib -Wl,--disable-new-dtags"` so the binary finds the libraries at run time.
+- `ffmpeg` on `PATH` for the loudness scan
 - An audio file to analyze
 
 ### Installation
@@ -74,7 +75,7 @@ go install github.com/iSerganov/gocue@latest
 | `--noclip` | `-k` | `false` | Lower gain if needed so true peak stays at or below −1 dBFS |
 | `--nice` | `-n` | `false` | Pretty-print JSON |
 | `--blankskip` | `-b` | `0.0` | Early cue-out on in-track silence longer than this many seconds (`0` = off) |
-| `--exec_timeout` | `-e` | `20s` | Timeout for ffprobe/ffmpeg |
+| `--exec_timeout` | `-e` | `20s` | Timeout for the tag probe and the ffmpeg scan |
 | `--print_flags` | `-p` | `false` | Log flag values to **stderr** (stdout stays JSON-only) |
 
 ### Parameter ranges
@@ -115,7 +116,7 @@ Loudness and gain fields are **unit-suffixed strings** (as required by the autoc
 
 | Field | Meaning |
 |-------|---------|
-| `duration` | File duration in seconds (from ffprobe when available) |
+| `duration` | File duration in seconds (from the container when available) |
 | `liq_cue_duration` | Playout length (`cue_out − cue_in`), seconds |
 | `liq_cue_in` / `liq_cue_out` | Cue points from start of file, seconds |
 | `liq_cross_start_next` | Suggested next-track overlay point, seconds |
@@ -356,11 +357,11 @@ done
 | Piece | Role |
 |-------|------|
 | `cmd/cue` | Cobra CLI: flags, validation, JSON on stdout |
-| `pkg/cue.Calculator` | ffprobe tag probe + ffmpeg ebur128 scan |
+| `pkg/cue.Calculator` | libav tag probe (cgo) + ffmpeg ebur128 scan |
 | `pkg/cue.Result` | Numeric result; unit suffixes only at JSON/YAML marshal |
 | `pkg/cue.Frame` | Per-frame momentary loudness (~100 ms) |
 
-**Dependencies:** FFmpeg/FFprobe (external), [Cobra](https://github.com/spf13/cobra), [yaml.v3](https://github.com/go-yaml/yaml) (library marshal helper).
+**Dependencies:** FFmpeg libraries through cgo and the `ffmpeg` binary (external), [Cobra](https://github.com/spf13/cobra), [yaml.v3](https://github.com/go-yaml/yaml) (library marshal helper).
 
 **Performance notes:**
 
@@ -380,7 +381,7 @@ go test -tags=integration ./integration/ -count=1 -timeout 10m
 # or: make test-integration
 ```
 
-Requires `ffmpeg` / `ffprobe` 9.0.1 on `PATH` for scan/probe tests; CI installs that version through [`.github/actions/setup-ffmpeg`](.github/actions/setup-ffmpeg/action.yml) and fails if a different one is found. Integration tests also need `liquidsoap` and use fixtures under `integration/testdata/` with scripts in `integration/scripts/`.
+Requires FFmpeg 9.0.1: the libraries through `pkg-config` for the build, and `ffmpeg` / `ffprobe` on `PATH` for the scan and for preparing tagged test files. CI installs that version through [`.github/actions/setup-ffmpeg`](.github/actions/setup-ffmpeg/action.yml) and fails if a different one is found. Integration tests also need `liquidsoap` and use fixtures under `integration/testdata/` with scripts in `integration/scripts/`.
 
 ## Project structure
 

@@ -146,8 +146,11 @@ golangci-lint run --timeout=5m
 go test ./pkg/cue -run TestCalculatorSuite/TestScanRegression -v
 ```
 
-`ffmpeg` and `ffprobe` must be on `PATH` for almost every test in `pkg/cue`.
-Integration tests additionally need `liquidsoap` 2.3.0+ and build their own
+`pkg/cue` links FFmpeg 9.0.1's libraries through cgo, found with `pkg-config`
+(Homebrew's `ffmpeg` and `pkg-config` locally). `ffmpeg` and `ffprobe` must
+also be on `PATH` for almost every test in `pkg/cue`. On Linux, link with
+`-Wl,--disable-new-dtags` as the CI action does, or libavformat cannot find
+libavcodec at run time. Integration tests additionally need `liquidsoap` 2.3.0+ and build their own
 binary into `integration/.bin/`. Check `liquidsoap --version` before assuming an
 integration failure is a code problem; a Homebrew build can lose its ffmpeg
 dylibs after an ffmpeg major upgrade.
@@ -160,7 +163,8 @@ all three green.
 | File | Role |
 |------|------|
 | [cmd/cue/cue.go](cmd/cue/cue.go) | Cobra CLI, flag ranges, JSON printing |
-| [pkg/cue/calculator.go](pkg/cue/calculator.go) | ffprobe tag probe, cached fast path, gain math |
+| [pkg/cue/calculator.go](pkg/cue/calculator.go) | Tag probe, cached fast path, gain math |
+| [pkg/cue/libav.go](pkg/cue/libav.go) | cgo bindings: opens files with libav and reads durations and tags as ffprobe would |
 | [pkg/cue/scan.go](pkg/cue/scan.go) | Full ffmpeg ebur128 scan and all cue/overlay math |
 | [pkg/cue/result.go](pkg/cue/result.go) | Numeric `Result`, unit suffixes applied only at marshal time |
 | [pkg/cue/frame.go](pkg/cue/frame.go) | One ebur128 frame (PTS + momentary loudness) |
@@ -224,7 +228,7 @@ are pinned in `TestScanRegression`. If that test moves, the port has drifted.
 
 ## Gotchas
 
-- Tag keys are lower-cased on the way in, because ffprobe reports them as the
+- Tag keys are lower-cased on the way in, because libav reports them as the
   container spells them. ID3 `TXXX` frames and Opus `R128_TRACK_GAIN` arrive
   uppercase. Keep every lookup key in `verifyTags` lowercase.
 - `numericTag` guards the cached path. Every tag the cached `Result` is built
@@ -237,7 +241,7 @@ are pinned in `TestScanRegression`. If that test moves, the port has drifted.
   never zero, so it compares as silence. ffmpeg emits `M=nan` on very silent
   parts of some files and upstream maps it the same way.
 - The library default execution timeout is 10s, the CLI default is 20s, and
-  `gocue.liq` passes 60s. One timeout covers both ffprobe and ffmpeg, and it
+  `gocue.liq` passes 60s. One timeout covers both the probe and the ffmpeg scan, and it
   does not scale with file length, so a long file on slow hardware needs a
   larger `-e`.
 - `--nice` means pretty-print JSON here. In Python it means run under `nice(1)`.
